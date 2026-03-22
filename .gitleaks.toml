@@ -1,0 +1,8 @@
+title = "MovieRater Gitleaks Config"
+
+[extend]
+useDefault = true
+
+# Intentionally minimal config:
+# - use upstream default rules
+# - add narrow allowlists only when a false positive is verified
