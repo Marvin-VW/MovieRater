@@ -22,7 +22,6 @@ class AddMoviePage extends StatefulWidget {
   final String? initialPosterUrl;
   final MovieMetadata? initialMetadata;
   final String? initialImdbId;
-  final String? initialCategory;
 
   const AddMoviePage({
     super.key,
@@ -32,7 +31,6 @@ class AddMoviePage extends StatefulWidget {
     this.initialPosterUrl,
     this.initialMetadata,
     this.initialImdbId,
-    this.initialCategory,
   });
 
   @override
@@ -49,10 +47,8 @@ class _AddMoviePageState extends State<AddMoviePage> {
   final _platformController = TextEditingController();
   final _imdbController = TextEditingController();
   final _rottenController = TextEditingController();
-  final _categoryController = TextEditingController();
 
   double _rating = 2.5;
-  DateTime? _watchedAt;
   File? _selectedImage;
   String _posterUrl = '';
   String _imdbId = '';
@@ -78,9 +74,7 @@ class _AddMoviePageState extends State<AddMoviePage> {
       _rating = movie.rating;
       _posterUrl = movie.posterUrl;
       _rottenController.text = movie.rottenTomatoesRating;
-      _categoryController.text = movie.category;
       _imdbId = movie.imdbId;
-      _watchedAt = _parseDate(movie.watchedAt);
       if (movie.imdbRating != null) {
         _imdbController.text = movie.imdbRating!.toStringAsFixed(1);
       }
@@ -111,19 +105,7 @@ class _AddMoviePageState extends State<AddMoviePage> {
     _platformController.dispose();
     _imdbController.dispose();
     _rottenController.dispose();
-    _categoryController.dispose();
     super.dispose();
-  }
-
-  DateTime? _parseDate(String value) {
-    if (value.trim().isEmpty) return null;
-    return DateTime.tryParse(value);
-  }
-
-  String _formatDate(DateTime date) {
-    final month = date.month.toString().padLeft(2, '0');
-    final day = date.day.toString().padLeft(2, '0');
-    return '${date.year}-$month-$day';
   }
 
   void _applyInitialSuggestion() {
@@ -143,9 +125,6 @@ class _AddMoviePageState extends State<AddMoviePage> {
       _posterUrl = initialPoster;
     }
     _imdbId = widget.initialImdbId?.trim() ?? '';
-    if ((widget.initialCategory?.trim() ?? '').isNotEmpty) {
-      _categoryController.text = widget.initialCategory!.trim();
-    }
     if (metadata == null) return;
 
     _fillController(_yearController, metadata.year, true);
@@ -448,22 +427,6 @@ class _AddMoviePageState extends State<AddMoviePage> {
     );
   }
 
-  Future<void> _pickWatchDate() async {
-    final now = DateTime.now();
-    final pickedDate = await showDatePicker(
-      context: context,
-      initialDate: _watchedAt ?? now,
-      firstDate: DateTime(1950),
-      lastDate: DateTime(now.year + 2),
-    );
-
-    if (pickedDate == null) return;
-
-    setState(() {
-      _watchedAt = pickedDate;
-    });
-  }
-
   Future<void> _pickImage() async {
     final picker = ImagePicker();
     final picked = await picker.pickImage(source: ImageSource.gallery);
@@ -532,12 +495,12 @@ class _AddMoviePageState extends State<AddMoviePage> {
       genre: _genreController.text.trim(),
       director: _directorController.text.trim(),
       runtime: _runtimeController.text.trim(),
-      watchedAt: _watchedAt != null ? _formatDate(_watchedAt!) : '',
+      watchedAt: DateTime.now().toIso8601String(),
       watchPlatform: _platformController.text.trim(),
       imdbRating: imdbValue,
       rottenTomatoesRating: _rottenController.text.trim(),
       imdbId: imdbId,
-      category: _categoryController.text.trim(),
+      category: widget.existingMovie?.category ?? '',
     );
 
     await DatabaseHelper.saveMovie(movie);
@@ -706,62 +669,20 @@ class _AddMoviePageState extends State<AddMoviePage> {
           ),
         );
       case 2:
-        final categorySuggestions = _categorySuggestions(t, context);
         return _sectionCard(
           context,
           title: t('entry_details_title'),
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: InkWell(
-                      onTap: _pickWatchDate,
-                      child: InputDecorator(
-                        decoration: InputDecoration(labelText: t('watched_on')),
-                        child: Text(
-                          _watchedAt == null
-                              ? t('select_date')
-                              : _formatDate(_watchedAt!),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextField(
-                      controller: _platformController,
-                      decoration: InputDecoration(
-                        labelText: t('watch_platform'),
-                      ),
-                    ),
-                  ),
-                ],
+              TextField(
+                controller: _platformController,
+                decoration: InputDecoration(labelText: t('watch_platform')),
               ),
               const SizedBox(height: 10),
-              TextField(
-                controller: _categoryController,
-                decoration: InputDecoration(
-                  labelText: t('category'),
-                  hintText: t('category_hint'),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: categorySuggestions
-                    .map(
-                      (value) => ActionChip(
-                        label: Text(value),
-                        onPressed: () {
-                          setState(() {
-                            _categoryController.text = value;
-                          });
-                        },
-                      ),
-                    )
-                    .toList(),
+              Text(
+                t('rated_on_save_hint'),
+                style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
           ),
@@ -848,32 +769,6 @@ class _AddMoviePageState extends State<AddMoviePage> {
           ),
         );
     }
-  }
-
-  List<String> _categorySuggestions(
-    String Function(String key) t,
-    BuildContext context,
-  ) {
-    final settings = AppSettingsScope.of(context);
-    final values = <String>[
-      t('category_wishlist'),
-      t('category_favorite'),
-      t('category_rewatch'),
-      ...settings.customCategories,
-    ];
-
-    final unique = <String>[];
-    for (final value in values) {
-      if (value.trim().isEmpty) continue;
-      final exists = unique.any(
-        (item) => item.toLowerCase() == value.toLowerCase(),
-      );
-      if (!exists) {
-        unique.add(value);
-      }
-    }
-
-    return unique;
   }
 
   Widget _posterPreview(BuildContext context, String Function(String key) t) {

@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui';
 
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_rating_bar/flutter_rating_bar.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../../app/localization/app_strings.dart';
 import '../../../app/settings/app_settings_controller.dart';
@@ -18,10 +22,42 @@ class MovieListPage extends StatefulWidget {
   State<MovieListPage> createState() => _MovieListPageState();
 }
 
+enum DiscoverSortField {
+  popularityDesc,
+  popularityAsc,
+  ratingDesc,
+  ratingAsc,
+  titleAsc,
+  titleDesc,
+}
+
 class _MovieListPageState extends State<MovieListPage>
     with SingleTickerProviderStateMixin {
+  static const _watchlistTag = '__watchlist__';
+  static const Map<int, String> _tmdbGenreNames = {
+    28: 'Action',
+    12: 'Adventure',
+    16: 'Animation',
+    35: 'Comedy',
+    80: 'Crime',
+    99: 'Documentary',
+    18: 'Drama',
+    10751: 'Family',
+    14: 'Fantasy',
+    36: 'History',
+    27: 'Horror',
+    10402: 'Music',
+    9648: 'Mystery',
+    10749: 'Romance',
+    878: 'Sci-Fi',
+    53: 'Thriller',
+    10752: 'War',
+    37: 'Western',
+  };
+
   final _searchController = TextEditingController();
   final _watchedSearchController = TextEditingController();
+  final _homeCarouselController = PageController(viewportFraction: 0.86);
 
   late final TabController _tabController;
 
@@ -32,23 +68,37 @@ class _MovieListPageState extends State<MovieListPage>
   SortDirection _sortDirection = SortDirection.desc;
   int _currentTab = 0;
 
-  String? _selectedGenre;
-  String? _selectedCategory;
+  int? _selectedDiscoverGenreId;
+  bool _watchedListView = false;
+  DiscoverSortField _discoverSortField = DiscoverSortField.popularityDesc;
+  int _homeCarouselIndex = 0;
   String _watchedSearchQuery = '';
+  String _lastTmdbApiKey = '';
   bool _isSearching = false;
   bool _isLoadingDiscover = false;
+  bool _hasLoadedDiscoverOnce = false;
+  String? _discoverLoadError;
   String? _addingImdbId;
   Timer? _searchDebounce;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 5, vsync: this);
     _tabController.addListener(_onTabChanged);
+    _homeCarouselController.addListener(_onHomeCarouselChanged);
     _loadMovies();
-    _loadDiscoverMovies();
     _searchController.addListener(_onSearchChanged);
     _watchedSearchController.addListener(_onWatchedSearchChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final tmdbApiKey = AppSettingsScope.of(context).tmdbApiKey.trim();
+    if (tmdbApiKey == _lastTmdbApiKey) return;
+    _lastTmdbApiKey = tmdbApiKey;
+    _loadDiscoverMovies();
   }
 
   @override
@@ -58,6 +108,8 @@ class _MovieListPageState extends State<MovieListPage>
     _searchController.dispose();
     _watchedSearchController.removeListener(_onWatchedSearchChanged);
     _watchedSearchController.dispose();
+    _homeCarouselController.removeListener(_onHomeCarouselChanged);
+    _homeCarouselController.dispose();
     _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
     super.dispose();
@@ -69,9 +121,17 @@ class _MovieListPageState extends State<MovieListPage>
     setState(() {
       _currentTab = nextTab;
     });
-    if (_currentTab == 2 && _discoverMovies.isEmpty) {
+    if (_currentTab == 0) {
       _loadDiscoverMovies();
     }
+  }
+
+  void _onHomeCarouselChanged() {
+    final page = _homeCarouselController.page?.round() ?? 0;
+    if (!mounted || page == _homeCarouselIndex) return;
+    setState(() {
+      _homeCarouselIndex = page;
+    });
   }
 
   void _onWatchedSearchChanged() {
@@ -82,74 +142,25 @@ class _MovieListPageState extends State<MovieListPage>
     });
   }
 
-  List<String> get _availableGenres {
-    final genres = <String>{};
-    for (final movie in _movies) {
-      final raw = movie.genre.trim();
-      if (raw.isEmpty) continue;
-      for (final value in raw.split(',')) {
-        final genre = value.trim();
-        if (genre.isNotEmpty) {
-          genres.add(genre);
-        }
-      }
-    }
-    final sorted = genres.toList()..sort((a, b) => a.compareTo(b));
-    return sorted;
+  bool _isWatchlistMovie(Movie movie) {
+    return movie.category.trim().toLowerCase() == _watchlistTag;
   }
 
-  List<String> _defaultCategories(BuildContext context) {
-    String t(String key) => AppStrings.text(context, key);
-    return [
-      t('category_wishlist'),
-      t('category_favorite'),
-      t('category_rewatch'),
-    ];
+  List<Movie> _watchedMovies() {
+    return _movies.where((movie) => !_isWatchlistMovie(movie)).toList();
   }
 
-  List<String> _availableCategories(BuildContext context) {
-    final settings = AppSettingsScope.of(context);
-    final categories = <String>{
-      ..._defaultCategories(context),
-      ...settings.customCategories,
-    };
-
-    for (final movie in _movies) {
-      final category = movie.category.trim();
-      if (category.isNotEmpty) {
-        categories.add(category);
-      }
-    }
-
-    final sorted = categories.toList()..sort((a, b) => a.compareTo(b));
-    return sorted;
+  List<Movie> _watchlistMovies() {
+    return _movies.where((movie) => _isWatchlistMovie(movie)).toList();
   }
 
   List<Movie> _filteredMovies(BuildContext context) {
     final query = _watchedSearchQuery.toLowerCase();
 
-    return _movies.where((movie) {
+    return _watchedMovies().where((movie) {
       final title = movie.title.toLowerCase();
       if (query.isNotEmpty && !title.contains(query)) {
         return false;
-      }
-
-      if (_selectedGenre != null && _selectedGenre!.isNotEmpty) {
-        final selected = _selectedGenre!.toLowerCase();
-        final genres = movie.genre
-            .toLowerCase()
-            .split(',')
-            .map((g) => g.trim())
-            .toList();
-        if (!genres.contains(selected)) {
-          return false;
-        }
-      }
-
-      if (_selectedCategory != null && _selectedCategory!.isNotEmpty) {
-        if (movie.category.toLowerCase() != _selectedCategory!.toLowerCase()) {
-          return false;
-        }
       }
 
       return true;
@@ -179,45 +190,6 @@ class _MovieListPageState extends State<MovieListPage>
     }
   }
 
-  Future<void> _editMovie(Movie movie) async {
-    final result = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => AddMoviePage(existingMovie: movie)),
-    );
-    if (result == true) {
-      _loadMovies();
-    }
-  }
-
-  Future<void> _deleteMovie(int id) async {
-    String t(String key) => AppStrings.text(context, key);
-
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(t('delete_confirm_title')),
-          content: Text(t('delete_confirm_message')),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: Text(t('cancel')),
-            ),
-            FilledButton.tonal(
-              onPressed: () => Navigator.pop(context, true),
-              child: Text(t('confirm_delete')),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirm != true) return;
-
-    await DatabaseHelper.deleteMovie(id);
-    _loadMovies();
-  }
-
   Future<void> _loadDiscoverMovies() async {
     final settings = AppSettingsScope.of(context);
     final tmdbApiKey = settings.tmdbApiKey.trim();
@@ -227,27 +199,40 @@ class _MovieListPageState extends State<MovieListPage>
       setState(() {
         _discoverMovies = [];
         _isLoadingDiscover = false;
+        _hasLoadedDiscoverOnce = true;
+        _discoverLoadError = null;
       });
       return;
     }
 
     setState(() {
       _isLoadingDiscover = true;
+      _discoverLoadError = null;
     });
 
     List<DiscoverMovie> movies = const [];
+    String? discoverLoadErrorKey;
     try {
       movies = await MovieMetadataService.discoverMovies(
         tmdbApiKey: tmdbApiKey,
       );
+    } on SocketException {
+      movies = const [];
+      discoverLoadErrorKey = 'discover_feed_offline';
+    } on TimeoutException {
+      movies = const [];
+      discoverLoadErrorKey = 'discover_feed_offline';
     } catch (_) {
       movies = const [];
+      discoverLoadErrorKey = 'discover_feed_error';
     }
 
     if (!mounted) return;
     setState(() {
       _isLoadingDiscover = false;
+      _hasLoadedDiscoverOnce = true;
       _discoverMovies = movies;
+      _discoverLoadError = discoverLoadErrorKey;
     });
   }
 
@@ -299,19 +284,8 @@ class _MovieListPageState extends State<MovieListPage>
     _loadMovies();
   }
 
-  Future<void> _openSettings() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const SettingsPage()),
-    );
-
-    if (!mounted) return;
-
-    final query = _searchController.text.trim();
-    if (query.length >= 2) {
-      _searchMovies(query);
-    }
-    _loadDiscoverMovies();
+  void _openSettings() {
+    _tabController.animateTo(4);
   }
 
   void _onSearchChanged() {
@@ -398,17 +372,22 @@ class _MovieListPageState extends State<MovieListPage>
 
     if (!mounted) return;
 
-    final addResult = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => AddMoviePage(
-          initialTitle: result.title,
-          initialYear: result.year,
-          initialPosterUrl: metadata?.posterUrl ?? result.posterUrl,
-          initialMetadata: metadata,
-          initialImdbId: result.imdbId,
-        ),
-      ),
+    final quickData = _CatalogPreviewData(
+      title: result.title,
+      year: metadata?.year ?? result.year,
+      posterUrl: metadata?.posterUrl ?? result.posterUrl,
+      genre: metadata?.genre ?? '',
+      director: metadata?.director ?? '',
+      runtime: metadata?.runtime ?? '',
+      plot: metadata?.plot ?? '',
+      imdbRating: metadata?.imdbRating,
+      rottenTomatoesRating: metadata?.rottenTomatoesRating ?? '',
+      imdbId: result.imdbId,
+    );
+    final rating = await _openQuickRatingEditor(
+      data: quickData,
+      initialRating: 3.0,
+      actionLabel: AppStrings.text(context, 'catalog_add_from_details'),
     );
 
     if (!mounted) return;
@@ -417,323 +396,131 @@ class _MovieListPageState extends State<MovieListPage>
       _addingImdbId = null;
     });
 
-    if (addResult == true) {
-      _loadMovies();
-      _tabController.animateTo(0);
-    }
+    if (rating == null) return;
+    await _saveMovieFromPreview(
+      data: quickData,
+      rating: rating,
+      imdbId: result.imdbId,
+    );
   }
 
   Future<void> _showSearchResultDetails(MovieSearchResult result) async {
-    String t(String key) => AppStrings.text(context, key);
     final settings = AppSettingsScope.of(context);
     final omdbApiKey = settings.omdbApiKey.trim();
     final tmdbApiKey = settings.tmdbApiKey.trim();
     final alreadyAdded = _isResultAlreadyAdded(result);
 
-    final metadataFuture = omdbApiKey.isEmpty
-        ? Future.value(null)
-        : MovieMetadataService.fetchMovieMetadataByImdbId(
-            result.imdbId,
-            omdbApiKey: omdbApiKey,
-            tmdbApiKey: tmdbApiKey,
-          );
-
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        return SafeArea(
-          child: FutureBuilder<MovieMetadata?>(
-            future: metadataFuture,
-            builder: (context, snapshot) {
-              final metadata = snapshot.data;
-              final posterUrl = metadata?.posterUrl ?? result.posterUrl;
-              final year = metadata?.year ?? result.year;
-              final genre = metadata?.genre ?? '';
-              final director = metadata?.director ?? '';
-              final runtime = metadata?.runtime ?? '';
-              final plot = metadata?.plot ?? '';
-              final imdb = metadata?.imdbRating;
-              final rotten = metadata?.rottenTomatoesRating ?? '';
-
-              return SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (posterUrl != null && posterUrl.isNotEmpty)
-                      Center(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(18),
-                          child: Image.network(
-                            posterUrl,
-                            width: 190,
-                            height: 270,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                                _emptyDiscoverPoster(),
-                          ),
-                        ),
-                      )
-                    else
-                      Center(
-                        child: SizedBox(
-                          width: 190,
-                          height: 270,
-                          child: _emptyDiscoverPoster(),
-                        ),
-                      ),
-                    const SizedBox(height: 14),
-                    Text(
-                      result.title,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w800),
-                    ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        Chip(
-                          label: Text(
-                            year.isEmpty ? t('catalog_year_unknown') : year,
-                          ),
-                        ),
-                        if (imdb != null)
-                          Chip(label: Text('IMDb ${imdb.toStringAsFixed(1)}')),
-                        if (rotten.isNotEmpty) Chip(label: Text('RT $rotten')),
-                      ],
-                    ),
-                    if (snapshot.connectionState ==
-                        ConnectionState.waiting) ...[
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(t('catalog_loading_details')),
-                        ],
-                      ),
-                    ] else ...[
-                      const SizedBox(height: 12),
-                      if (genre.isNotEmpty) Text('${t('genre')}: $genre'),
-                      if (director.isNotEmpty)
-                        Text('${t('director')}: $director'),
-                      if (runtime.isNotEmpty) Text('${t('runtime')}: $runtime'),
-                      if (plot.isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        Text(plot),
-                      ],
-                    ],
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: alreadyAdded
-                          ? FilledButton.tonal(
-                              onPressed: null,
-                              child: Text(t('catalog_already_added')),
-                            )
-                          : FilledButton.icon(
-                              onPressed: _addingImdbId == result.imdbId
-                                  ? null
-                                  : () async {
-                                      Navigator.pop(sheetContext);
-                                      await _addFromSearchResult(result);
-                                    },
-                              icon: _addingImdbId == result.imdbId
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.playlist_add),
-                              label: Text(t('catalog_add_from_details')),
-                            ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: double.infinity,
-                      child: TextButton(
-                        onPressed: () => Navigator.pop(sheetContext),
-                        child: Text(t('close')),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        );
-      },
+    final initialData = _CatalogPreviewData(
+      title: result.title,
+      year: result.year,
+      posterUrl: result.posterUrl,
+      imdbId: result.imdbId,
     );
+
+    final detailsFuture = omdbApiKey.isEmpty
+        ? Future.value(initialData)
+        : MovieMetadataService.fetchMovieMetadataByImdbId(
+                result.imdbId,
+                omdbApiKey: omdbApiKey,
+                tmdbApiKey: tmdbApiKey,
+              )
+              .then((metadata) {
+                return initialData.copyWith(
+                  year: metadata?.year ?? initialData.year,
+                  posterUrl: metadata?.posterUrl ?? initialData.posterUrl,
+                  genre: metadata?.genre ?? '',
+                  director: metadata?.director ?? '',
+                  runtime: metadata?.runtime ?? '',
+                  plot: metadata?.plot ?? '',
+                  imdbRating: metadata?.imdbRating,
+                  rottenTomatoesRating: metadata?.rottenTomatoesRating ?? '',
+                  imdbId: metadata?.imdbId ?? initialData.imdbId,
+                );
+              })
+              .catchError((_) => initialData);
+
+    final shouldAdd = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CatalogMoviePreviewPage(
+          initialData: initialData,
+          detailsFuture: detailsFuture,
+          primaryActionLabel: alreadyAdded
+              ? AppStrings.text(context, 'catalog_already_added')
+              : AppStrings.text(context, 'catalog_add_from_details'),
+          primaryActionEnabled: !alreadyAdded,
+          onFavoriteTap: alreadyAdded ? null : _addToWatchlistFromPreview,
+        ),
+      ),
+    );
+
+    if (shouldAdd == true) {
+      await _addFromSearchResult(result);
+    }
   }
 
   Future<void> _showDiscoverMovieDetails(DiscoverMovie movie) async {
-    String t(String key) => AppStrings.text(context, key);
     final settings = AppSettingsScope.of(context);
     final tmdbApiKey = settings.tmdbApiKey.trim();
     if (tmdbApiKey.isEmpty) return;
 
-    final detailsFuture = MovieMetadataService.fetchTmdbMovieDetails(
-      movie.tmdbId,
-      tmdbApiKey: tmdbApiKey,
+    final initialDetails = TmdbMovieDetails(
+      tmdbId: movie.tmdbId,
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl,
+      overview: movie.overview,
+    );
+    final initialData = _CatalogPreviewData(
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl,
+      plot: movie.overview,
+      tmdbRating: movie.voteAverage > 0 ? movie.voteAverage : null,
+      imdbId: initialDetails.imdbId,
     );
 
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (sheetContext) {
-        return SafeArea(
-          child: FutureBuilder<TmdbMovieDetails?>(
-            future: detailsFuture,
-            builder: (context, snapshot) {
-              final details = snapshot.data;
-              final data =
-                  details ??
-                  TmdbMovieDetails(
-                    tmdbId: movie.tmdbId,
-                    title: movie.title,
-                    year: movie.year,
-                    posterUrl: movie.posterUrl,
-                    overview: movie.overview,
-                  );
-
-              final alreadyAdded = _isTmdbSuggestionAlreadyAdded(data);
-              final buttonKey = data.imdbId.isEmpty
-                  ? 'tmdb-${data.tmdbId}'
-                  : data.imdbId;
-
-              return SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if ((data.posterUrl ?? '').isNotEmpty)
-                      Center(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(18),
-                          child: Image.network(
-                            data.posterUrl!,
-                            width: 190,
-                            height: 270,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                                _emptyDiscoverPoster(),
-                          ),
-                        ),
-                      )
-                    else
-                      Center(
-                        child: SizedBox(
-                          width: 190,
-                          height: 270,
-                          child: _emptyDiscoverPoster(),
-                        ),
-                      ),
-                    const SizedBox(height: 14),
-                    Text(
-                      data.title,
-                      style: Theme.of(context).textTheme.headlineSmall
-                          ?.copyWith(fontWeight: FontWeight.w800),
-                    ),
-                    const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        Chip(
-                          label: Text(
-                            data.year.isEmpty
-                                ? t('catalog_year_unknown')
-                                : data.year,
-                          ),
-                        ),
-                        if (movie.voteAverage > 0)
-                          Chip(
-                            label: Text(
-                              'TMDB ${movie.voteAverage.toStringAsFixed(1)}',
-                            ),
-                          ),
-                      ],
-                    ),
-                    if (snapshot.connectionState ==
-                        ConnectionState.waiting) ...[
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(t('catalog_loading_details')),
-                        ],
-                      ),
-                    ] else ...[
-                      const SizedBox(height: 12),
-                      if (data.genre.isNotEmpty)
-                        Text('${t('genre')}: ${data.genre}'),
-                      if (data.director.isNotEmpty)
-                        Text('${t('director')}: ${data.director}'),
-                      if (data.runtime.isNotEmpty)
-                        Text('${t('runtime')}: ${data.runtime}'),
-                      if (data.overview.isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        Text(data.overview),
-                      ],
-                    ],
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: alreadyAdded
-                          ? FilledButton.tonal(
-                              onPressed: null,
-                              child: Text(t('catalog_already_added')),
-                            )
-                          : FilledButton.icon(
-                              onPressed: _addingImdbId == buttonKey
-                                  ? null
-                                  : () async {
-                                      Navigator.pop(sheetContext);
-                                      await _addFromTmdbDetails(data);
-                                    },
-                              icon: _addingImdbId == buttonKey
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.playlist_add),
-                              label: Text(t('catalog_add_from_details')),
-                            ),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: double.infinity,
-                      child: TextButton(
-                        onPressed: () => Navigator.pop(sheetContext),
-                        child: Text(t('close')),
-                      ),
-                    ),
-                  ],
-                ),
+    TmdbMovieDetails? loadedDetails;
+    final detailsFuture =
+        MovieMetadataService.fetchTmdbMovieDetails(
+              movie.tmdbId,
+              tmdbApiKey: tmdbApiKey,
+            )
+            .then((details) {
+              loadedDetails = details;
+              final data = details ?? initialDetails;
+              return initialData.copyWith(
+                title: data.title,
+                year: data.year,
+                posterUrl: data.posterUrl,
+                plot: data.overview,
+                genre: data.genre,
+                director: data.director,
+                runtime: data.runtime,
+                imdbId: data.imdbId,
               );
-            },
-          ),
-        );
-      },
+            })
+            .catchError((_) => initialData);
+
+    final previewResult = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CatalogMoviePreviewPage(
+          initialData: initialData,
+          detailsFuture: detailsFuture,
+          primaryActionLabel: _isTmdbSuggestionAlreadyAdded(initialDetails)
+              ? AppStrings.text(context, 'catalog_already_added')
+              : AppStrings.text(context, 'catalog_add_from_details'),
+          primaryActionEnabled: !_isTmdbSuggestionAlreadyAdded(initialDetails),
+          onFavoriteTap: _isTmdbSuggestionAlreadyAdded(initialDetails)
+              ? null
+              : _addToWatchlistFromPreview,
+        ),
+      ),
     );
+    if (previewResult != true) return;
+
+    await _addFromTmdbDetails(loadedDetails ?? initialDetails);
   }
 
   Future<void> _addFromTmdbDetails(TmdbMovieDetails details) async {
@@ -783,18 +570,22 @@ class _MovieListPageState extends State<MovieListPage>
           runtime: details.runtime,
           plot: details.overview,
         );
-
-    final addResult = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => AddMoviePage(
-          initialTitle: details.title,
-          initialYear: details.year,
-          initialPosterUrl: details.posterUrl,
-          initialMetadata: seedMetadata,
-          initialImdbId: details.imdbId,
-        ),
-      ),
+    final quickData = _CatalogPreviewData(
+      title: details.title,
+      year: seedMetadata.year ?? details.year,
+      posterUrl: seedMetadata.posterUrl ?? details.posterUrl,
+      genre: seedMetadata.genre ?? details.genre,
+      director: seedMetadata.director ?? details.director,
+      runtime: seedMetadata.runtime ?? details.runtime,
+      plot: seedMetadata.plot ?? details.overview,
+      imdbRating: seedMetadata.imdbRating,
+      rottenTomatoesRating: seedMetadata.rottenTomatoesRating ?? '',
+      imdbId: seedMetadata.imdbId ?? details.imdbId,
+    );
+    final rating = await _openQuickRatingEditor(
+      data: quickData,
+      initialRating: 3.0,
+      actionLabel: AppStrings.text(context, 'catalog_add_from_details'),
     );
 
     if (!mounted) return;
@@ -803,10 +594,13 @@ class _MovieListPageState extends State<MovieListPage>
       _addingImdbId = null;
     });
 
-    if (addResult == true) {
-      _loadMovies();
-      _tabController.animateTo(0);
-    }
+    if (rating == null) return;
+
+    await _saveMovieFromPreview(
+      data: quickData,
+      rating: rating,
+      imdbId: quickData.imdbId,
+    );
   }
 
   Widget _emptyDiscoverPoster() {
@@ -825,118 +619,250 @@ class _MovieListPageState extends State<MovieListPage>
     );
   }
 
-  void _openDrawer(BuildContext context) {
-    Scaffold.of(context).openDrawer();
-  }
-
   void _goToTab(int index) {
-    Navigator.pop(context);
     _tabController.animateTo(index);
   }
 
-  void _setGenreFilter(String? genre) {
-    setState(() {
-      _selectedGenre = genre;
-    });
-    Navigator.pop(context);
-    _tabController.animateTo(0);
+  String _nowTimestamp() {
+    return DateTime.now().toIso8601String();
   }
 
-  void _setCategoryFilter(String? category) {
-    setState(() {
-      _selectedCategory = category;
-    });
-    Navigator.pop(context);
-    _tabController.animateTo(0);
+  Future<double?> _openQuickRatingEditor({
+    required _CatalogPreviewData data,
+    required double initialRating,
+    required String actionLabel,
+  }) {
+    return Navigator.push<double>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _QuickMovieRatingPage(
+          data: data,
+          initialRating: initialRating,
+          actionLabel: actionLabel,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _saveMovieFromPreview({
+    required _CatalogPreviewData data,
+    required double rating,
+    required String imdbId,
+    String category = '',
+  }) async {
+    final normalizedTitle = data.title.trim();
+    if (normalizedTitle.isEmpty) return;
+
+    final isDuplicate = await DatabaseHelper.movieExists(
+      imdbId: imdbId.trim().isEmpty ? null : imdbId.trim(),
+      title: normalizedTitle,
+      year: data.year.trim(),
+    );
+    if (isDuplicate) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppStrings.text(context, 'catalog_duplicate_blocked')),
+        ),
+      );
+      return;
+    }
+
+    final movie = Movie(
+      title: normalizedTitle,
+      rating: rating,
+      comment: data.plot,
+      imagePath: '',
+      posterUrl: data.posterUrl ?? '',
+      year: data.year,
+      genre: data.genre,
+      director: data.director,
+      runtime: data.runtime,
+      watchedAt: _nowTimestamp(),
+      watchPlatform: '',
+      imdbRating: data.imdbRating,
+      rottenTomatoesRating: data.rottenTomatoesRating,
+      imdbId: imdbId.trim(),
+      category: category,
+    );
+
+    await DatabaseHelper.saveMovie(movie);
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(AppStrings.text(context, 'movie_saved'))),
+    );
+    _loadMovies();
+    _tabController.animateTo(2);
+  }
+
+  Future<void> _addToWatchlistFromPreview(_CatalogPreviewData data) async {
+    final normalizedTitle = data.title.trim();
+    if (normalizedTitle.isEmpty) return;
+
+    final isDuplicate = await DatabaseHelper.movieExists(
+      imdbId: data.imdbId.trim().isEmpty ? null : data.imdbId.trim(),
+      title: normalizedTitle,
+      year: data.year.trim(),
+    );
+    if (isDuplicate) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppStrings.text(context, 'catalog_duplicate_blocked')),
+        ),
+      );
+      return;
+    }
+
+    final movie = Movie(
+      title: normalizedTitle,
+      rating: 0,
+      comment: data.plot,
+      imagePath: '',
+      posterUrl: data.posterUrl ?? '',
+      year: data.year,
+      genre: data.genre,
+      director: data.director,
+      runtime: data.runtime,
+      watchedAt: '',
+      watchPlatform: '',
+      imdbRating: data.imdbRating,
+      rottenTomatoesRating: data.rottenTomatoesRating,
+      imdbId: data.imdbId.trim(),
+      category: _watchlistTag,
+    );
+
+    await DatabaseHelper.saveMovie(movie);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(AppStrings.text(context, 'watchlist_added'))),
+    );
+    _loadMovies();
+    _tabController.animateTo(3);
+  }
+
+  Future<void> _updateMovieRating(Movie movie, double newRating) async {
+    final updatedMovie = Movie(
+      id: movie.id,
+      title: movie.title,
+      rating: newRating,
+      comment: movie.comment,
+      imagePath: movie.imagePath,
+      posterUrl: movie.posterUrl,
+      year: movie.year,
+      genre: movie.genre,
+      director: movie.director,
+      runtime: movie.runtime,
+      watchedAt: _nowTimestamp(),
+      watchPlatform: movie.watchPlatform,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesRating: movie.rottenTomatoesRating,
+      imdbId: movie.imdbId,
+      category: movie.category,
+    );
+    await DatabaseHelper.saveMovie(updatedMovie);
+    if (!mounted) return;
+    _loadMovies();
+  }
+
+  Future<void> _markWatchlistMovieAsWatched(Movie movie, double rating) async {
+    final updatedMovie = Movie(
+      id: movie.id,
+      title: movie.title,
+      rating: rating,
+      comment: movie.comment,
+      imagePath: movie.imagePath,
+      posterUrl: movie.posterUrl,
+      year: movie.year,
+      genre: movie.genre,
+      director: movie.director,
+      runtime: movie.runtime,
+      watchedAt: _nowTimestamp(),
+      watchPlatform: movie.watchPlatform,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesRating: movie.rottenTomatoesRating,
+      imdbId: movie.imdbId,
+      category: '',
+    );
+    await DatabaseHelper.saveMovie(updatedMovie);
+    if (!mounted) return;
+    _loadMovies();
+    _tabController.animateTo(2);
   }
 
   Future<void> _showMovieDetails(Movie movie) async {
-    String t(String key) => AppStrings.text(context, key);
-
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) {
-        return SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  movie.year.isNotEmpty
-                      ? '${movie.title} (${movie.year})'
-                      : movie.title,
-                  style: Theme.of(context).textTheme.headlineSmall,
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    Chip(
-                      label: Text(
-                        '${t('personal_rating')}: ${movie.rating.toStringAsFixed(1)}',
-                      ),
-                    ),
-                    if (movie.imdbRating != null)
-                      Chip(
-                        label: Text(
-                          'IMDb ${movie.imdbRating!.toStringAsFixed(1)}',
-                        ),
-                      ),
-                    if (movie.rottenTomatoesRating.isNotEmpty)
-                      Chip(label: Text('RT ${movie.rottenTomatoesRating}')),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                if (movie.genre.isNotEmpty)
-                  Text('${t('genre')}: ${movie.genre}'),
-                if (movie.director.isNotEmpty)
-                  Text('${t('director')}: ${movie.director}'),
-                if (movie.runtime.isNotEmpty)
-                  Text('${t('runtime')}: ${movie.runtime}'),
-                if (movie.category.isNotEmpty)
-                  Text('${t('category')}: ${movie.category}'),
-                if (movie.watchedAt.isNotEmpty)
-                  Text('${t('watched_on')}: ${movie.watchedAt}'),
-                if (movie.watchPlatform.isNotEmpty)
-                  Text('${t('watch_platform')}: ${movie.watchPlatform}'),
-                const SizedBox(height: 10),
-                Text(
-                  movie.comment.isEmpty ? t('no_comment') : movie.comment,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    FilledButton.tonalIcon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _editMovie(movie);
-                      },
-                      icon: const Icon(Icons.edit_outlined),
-                      label: Text(t('edit')),
-                    ),
-                    FilledButton.tonalIcon(
-                      onPressed: () {
-                        Navigator.pop(context);
-                        _deleteMovie(movie.id!);
-                      },
-                      icon: const Icon(Icons.delete_outline),
-                      label: Text(t('delete')),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+    final changeRatingLabel = AppStrings.text(context, 'change_rating');
+    final data = _CatalogPreviewData(
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl.isNotEmpty ? movie.posterUrl : null,
+      genre: movie.genre,
+      director: movie.director,
+      runtime: movie.runtime,
+      plot: movie.comment,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesRating: movie.rottenTomatoesRating,
+      imdbId: movie.imdbId,
     );
+
+    final wantsEdit = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CatalogMoviePreviewPage(
+          initialData: data,
+          detailsFuture: Future.value(data),
+          primaryActionLabel: changeRatingLabel,
+          primaryActionEnabled: true,
+        ),
+      ),
+    );
+    if (wantsEdit != true) return;
+
+    final newRating = await _openQuickRatingEditor(
+      data: data,
+      initialRating: movie.rating,
+      actionLabel: changeRatingLabel,
+    );
+    if (newRating == null) return;
+    await _updateMovieRating(movie, newRating);
+  }
+
+  Future<void> _showWatchlistMovieDetails(Movie movie) async {
+    final markWatchedLabel = AppStrings.text(context, 'mark_as_watched');
+    final data = _CatalogPreviewData(
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl.isNotEmpty ? movie.posterUrl : null,
+      genre: movie.genre,
+      director: movie.director,
+      runtime: movie.runtime,
+      plot: movie.comment,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesRating: movie.rottenTomatoesRating,
+      imdbId: movie.imdbId,
+    );
+
+    final wantsMark = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _CatalogMoviePreviewPage(
+          initialData: data,
+          detailsFuture: Future.value(data),
+          primaryActionLabel: markWatchedLabel,
+          primaryActionEnabled: true,
+        ),
+      ),
+    );
+    if (wantsMark != true) return;
+
+    final rating = await _openQuickRatingEditor(
+      data: data,
+      initialRating: 3.0,
+      actionLabel: markWatchedLabel,
+    );
+    if (rating == null) return;
+    await _markWatchlistMovieAsWatched(movie, rating);
   }
 
   Widget _buildPoster(Movie movie) {
@@ -963,7 +889,6 @@ class _MovieListPageState extends State<MovieListPage>
   }
 
   Widget _watchedBubbleCard(Movie movie) {
-    String t(String key) => AppStrings.text(context, key);
     final colorScheme = Theme.of(context).colorScheme;
 
     return GestureDetector(
@@ -1041,16 +966,20 @@ class _MovieListPageState extends State<MovieListPage>
                     spacing: 6,
                     runSpacing: 6,
                     children: [
-                      if (movie.category.isNotEmpty)
-                        _metricPill(movie.category),
-                      _metricPill(
-                        '${t('personal_rating')}: ${movie.rating.toStringAsFixed(1)}',
+                      _metricPill('${movie.rating.toStringAsFixed(1)} / 5'),
+                      _sourceRatingBadge(
+                        icon: FontAwesomeIcons.imdb,
+                        value: movie.imdbRating?.toStringAsFixed(1) ?? '-',
+                        background: const Color(0xFFF5C74C),
+                        foreground: const Color(0xFF3A2A00),
                       ),
-                      _metricPill(
-                        'IMDb ${movie.imdbRating?.toStringAsFixed(1) ?? '-'}',
-                      ),
-                      _metricPill(
-                        'RT ${movie.rottenTomatoesRating.isEmpty ? '-' : movie.rottenTomatoesRating}',
+                      _sourceRatingBadge(
+                        icon: Icons.percent_rounded,
+                        value: movie.rottenTomatoesRating.isEmpty
+                            ? '-'
+                            : movie.rottenTomatoesRating,
+                        background: const Color(0xFFEF5851),
+                        foreground: Colors.white,
                       ),
                     ],
                   ),
@@ -1072,11 +1001,89 @@ class _MovieListPageState extends State<MovieListPage>
         color: colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(999),
       ),
-      child: Text(
-        text,
-        style: Theme.of(
-          context,
-        ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w700),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.star_rounded, size: 13, color: Color(0xFFFFB322)),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w700),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sourceRatingBadge({
+    required IconData icon,
+    required String value,
+    required Color background,
+    required Color foreground,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FaIcon(icon, size: 12, color: foreground),
+          const SizedBox(width: 4),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: foreground,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _watchedListTile(Movie movie) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      ),
+      child: ListTile(
+        onTap: () => _showMovieDetails(movie),
+        leading: _SearchPoster(
+          posterUrl: movie.posterUrl,
+          width: 58,
+          height: 84,
+        ),
+        title: Text(
+          movie.year.isEmpty ? movie.title : '${movie.title} (${movie.year})',
+        ),
+        subtitle: Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            _metricPill(movie.rating.toStringAsFixed(1)),
+            _sourceRatingBadge(
+              icon: FontAwesomeIcons.imdb,
+              value: movie.imdbRating?.toStringAsFixed(1) ?? '-',
+              background: const Color(0xFFF5C74C),
+              foreground: const Color(0xFF3A2A00),
+            ),
+            _sourceRatingBadge(
+              icon: Icons.percent_rounded,
+              value: movie.rottenTomatoesRating.isEmpty
+                  ? '-'
+                  : movie.rottenTomatoesRating,
+              background: const Color(0xFFEF5851),
+              foreground: Colors.white,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1131,37 +1138,24 @@ class _MovieListPageState extends State<MovieListPage>
                         icon: const Icon(Icons.add, size: 18),
                         label: Text(t('manual_add_movie')),
                       ),
+                    if (movies.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      IconButton.filledTonal(
+                        onPressed: () {
+                          setState(() {
+                            _watchedListView = !_watchedListView;
+                          });
+                        },
+                        icon: Icon(
+                          _watchedListView
+                              ? Icons.grid_view_rounded
+                              : Icons.view_list_rounded,
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  if (_selectedGenre != null && _selectedGenre!.isNotEmpty)
-                    InputChip(
-                      label: Text('${t('drawer_genres')}: $_selectedGenre'),
-                      onDeleted: () {
-                        setState(() {
-                          _selectedGenre = null;
-                        });
-                      },
-                    ),
-                  if (_selectedCategory != null &&
-                      _selectedCategory!.isNotEmpty)
-                    InputChip(
-                      label: Text(
-                        '${t('drawer_categories')}: $_selectedCategory',
-                      ),
-                      onDeleted: () {
-                        setState(() {
-                          _selectedCategory = null;
-                        });
-                      },
-                    ),
-                ],
-              ),
-              const SizedBox(height: 8),
               Expanded(
                 child: movies.isEmpty
                     ? Center(
@@ -1186,6 +1180,15 @@ class _MovieListPageState extends State<MovieListPage>
                           ],
                         ),
                       )
+                    : _watchedListView
+                    ? ListView.separated(
+                        itemCount: movies.length,
+                        separatorBuilder: (_, __) => const SizedBox(height: 10),
+                        itemBuilder: (context, index) {
+                          final movie = movies[index];
+                          return _watchedListTile(movie);
+                        },
+                      )
                     : GridView.builder(
                         itemCount: movies.length,
                         gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
@@ -1207,11 +1210,73 @@ class _MovieListPageState extends State<MovieListPage>
     );
   }
 
+  List<MapEntry<int, String>> _discoverGenreEntries() {
+    final counts = <int, int>{};
+    for (final movie in _discoverMovies) {
+      for (final genreId in movie.genreIds) {
+        counts.update(genreId, (value) => value + 1, ifAbsent: () => 1);
+      }
+    }
+
+    final entries = counts.entries.toList()
+      ..sort((a, b) {
+        final countCompare = b.value.compareTo(a.value);
+        if (countCompare != 0) return countCompare;
+        final aName = _tmdbGenreNames[a.key] ?? 'Genre ${a.key}';
+        final bName = _tmdbGenreNames[b.key] ?? 'Genre ${b.key}';
+        return aName.compareTo(bName);
+      });
+
+    return entries
+        .map((entry) {
+          final name = _tmdbGenreNames[entry.key];
+          if (name == null) return null;
+          return MapEntry(entry.key, name);
+        })
+        .whereType<MapEntry<int, String>>()
+        .take(10)
+        .toList();
+  }
+
+  List<DiscoverMovie> _filteredDiscoverFeedMovies() {
+    Iterable<DiscoverMovie> movies = _discoverMovies;
+    if (_selectedDiscoverGenreId != null) {
+      movies = movies.where(
+        (movie) => movie.genreIds.contains(_selectedDiscoverGenreId),
+      );
+    }
+    final sorted = movies.toList();
+    switch (_discoverSortField) {
+      case DiscoverSortField.popularityDesc:
+        sorted.sort((a, b) => b.popularity.compareTo(a.popularity));
+        break;
+      case DiscoverSortField.popularityAsc:
+        sorted.sort((a, b) => a.popularity.compareTo(b.popularity));
+        break;
+      case DiscoverSortField.ratingDesc:
+        sorted.sort((a, b) => b.voteAverage.compareTo(a.voteAverage));
+        break;
+      case DiscoverSortField.ratingAsc:
+        sorted.sort((a, b) => a.voteAverage.compareTo(b.voteAverage));
+        break;
+      case DiscoverSortField.titleAsc:
+        sorted.sort((a, b) => a.title.compareTo(b.title));
+        break;
+      case DiscoverSortField.titleDesc:
+        sorted.sort((a, b) => b.title.compareTo(a.title));
+        break;
+    }
+    return sorted;
+  }
+
   Widget _buildDiscoverTab(BuildContext context) {
     String t(String key) => AppStrings.text(context, key);
     final settings = AppSettingsScope.of(context);
     final hasOmdbKey = settings.omdbApiKey.trim().isNotEmpty;
+    final hasTmdbKey = settings.tmdbApiKey.trim().isNotEmpty;
     final query = _searchController.text.trim();
+    final discoverFeedMovies = _filteredDiscoverFeedMovies();
+    final genreEntries = _discoverGenreEntries();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
@@ -1268,6 +1333,196 @@ class _MovieListPageState extends State<MovieListPage>
           Expanded(
             child: Builder(
               builder: (context) {
+                if (query.isEmpty) {
+                  if (!hasTmdbKey) {
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            t('discover_feed_missing_key'),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 8),
+                          FilledButton.tonal(
+                            onPressed: _openSettings,
+                            child: Text(t('catalog_open_settings')),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
+                  if (_isLoadingDiscover && discoverFeedMovies.isEmpty) {
+                    return const Center(
+                      child: SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2.2),
+                      ),
+                    );
+                  }
+
+                  if (_discoverLoadError != null &&
+                      discoverFeedMovies.isEmpty) {
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            t(_discoverLoadError ?? 'discover_feed_error'),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 8),
+                          FilledButton.tonal(
+                            onPressed: _loadDiscoverMovies,
+                            child: Text(t('retry')),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
+                  if (discoverFeedMovies.isEmpty) {
+                    return Center(
+                      child: Text(
+                        t('discover_feed_empty'),
+                        textAlign: TextAlign.center,
+                      ),
+                    );
+                  }
+
+                  return Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: SizedBox(
+                              height: 40,
+                              child: ListView(
+                                scrollDirection: Axis.horizontal,
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 8),
+                                    child: ChoiceChip(
+                                      label: Text(t('drawer_all_genres')),
+                                      selected:
+                                          _selectedDiscoverGenreId == null,
+                                      onSelected: (_) {
+                                        setState(() {
+                                          _selectedDiscoverGenreId = null;
+                                        });
+                                      },
+                                    ),
+                                  ),
+                                  ...genreEntries.map(
+                                    (entry) => Padding(
+                                      padding: const EdgeInsets.only(right: 8),
+                                      child: ChoiceChip(
+                                        label: Text(entry.value),
+                                        selected:
+                                            _selectedDiscoverGenreId ==
+                                            entry.key,
+                                        onSelected: (_) {
+                                          setState(() {
+                                            _selectedDiscoverGenreId =
+                                                entry.key;
+                                          });
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          PopupMenuButton<DiscoverSortField>(
+                            tooltip: t('select_sort'),
+                            onSelected: (value) {
+                              setState(() {
+                                _discoverSortField = value;
+                              });
+                            },
+                            itemBuilder: (context) => [
+                              PopupMenuItem(
+                                value: DiscoverSortField.popularityDesc,
+                                child: Text(t('sort_popularity_desc')),
+                              ),
+                              PopupMenuItem(
+                                value: DiscoverSortField.popularityAsc,
+                                child: Text(t('sort_popularity_asc')),
+                              ),
+                              PopupMenuItem(
+                                value: DiscoverSortField.ratingDesc,
+                                child: Text(t('rating_desc')),
+                              ),
+                              PopupMenuItem(
+                                value: DiscoverSortField.ratingAsc,
+                                child: Text(t('rating_asc')),
+                              ),
+                              PopupMenuItem(
+                                value: DiscoverSortField.titleAsc,
+                                child: Text(t('title_asc')),
+                              ),
+                              PopupMenuItem(
+                                value: DiscoverSortField.titleDesc,
+                                child: Text(t('sort_title_desc')),
+                              ),
+                            ],
+                            icon: const Icon(Icons.sort),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: ListView.separated(
+                          itemCount: discoverFeedMovies.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            final movie = discoverFeedMovies[index];
+                            return DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.surface,
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: Theme.of(
+                                    context,
+                                  ).colorScheme.outlineVariant,
+                                ),
+                              ),
+                              child: ListTile(
+                                onTap: () => _showDiscoverMovieDetails(movie),
+                                contentPadding: const EdgeInsets.fromLTRB(
+                                  10,
+                                  8,
+                                  10,
+                                  8,
+                                ),
+                                leading: _SearchPoster(
+                                  posterUrl: movie.posterUrl,
+                                  width: 58,
+                                  height: 84,
+                                ),
+                                title: Text(
+                                  movie.year.isEmpty
+                                      ? movie.title
+                                      : '${movie.title} (${movie.year})',
+                                ),
+                                subtitle: Text(
+                                  '${t('sort_popularity_desc')}: ${movie.popularity.toStringAsFixed(0)}',
+                                ),
+                                trailing: const Icon(Icons.chevron_right),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  );
+                }
+
                 if (!hasOmdbKey) {
                   return Center(
                     child: Column(
@@ -1283,15 +1538,6 @@ class _MovieListPageState extends State<MovieListPage>
                           child: Text(t('catalog_open_settings')),
                         ),
                       ],
-                    ),
-                  );
-                }
-
-                if (query.isEmpty) {
-                  return Center(
-                    child: Text(
-                      t('catalog_prompt'),
-                      textAlign: TextAlign.center,
                     ),
                   );
                 }
@@ -1383,91 +1629,679 @@ class _MovieListPageState extends State<MovieListPage>
     );
   }
 
-  Widget _buildDiscoverFeedTab(BuildContext context) {
+  Widget _buildHomeTab(BuildContext context) {
     String t(String key) => AppStrings.text(context, key);
     final settings = AppSettingsScope.of(context);
     final hasTmdbKey = settings.tmdbApiKey.trim().isNotEmpty;
+    final colorScheme = Theme.of(context).colorScheme;
+    final heroMovies = _discoverMovies.take(5).toList();
+    final heroIds = heroMovies.map((movie) => movie.tmdbId).toSet();
+    final popularMovies = _discoverMovies
+        .where((movie) => !heroIds.contains(movie.tmdbId))
+        .take(16)
+        .toList();
+    final genreEntries = _discoverGenreEntries();
+
+    final accent = const Color(0xFF1ED2E8);
+
+    if (hasTmdbKey && !_hasLoadedDiscoverOnce) {
+      return const Center(
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: CircularProgressIndicator(strokeWidth: 2.4),
+        ),
+      );
+    }
+
+    if (hasTmdbKey && _discoverLoadError != null && heroMovies.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: colorScheme.surface.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: colorScheme.outlineVariant),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    t(_discoverLoadError ?? 'discover_feed_error'),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 10),
+                  FilledButton.tonal(
+                    onPressed: _loadDiscoverMovies,
+                    child: Text(t('retry')),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    return SafeArea(
+      bottom: false,
+      child: RefreshIndicator(
+        onRefresh: _loadDiscoverMovies,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(0, 6, 0, 14),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          t('app_brand'),
+                          style: Theme.of(context).textTheme.headlineSmall
+                              ?.copyWith(fontWeight: FontWeight.w900),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          t('home_greeting_subtitle'),
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _homeIconButton(
+                    context: context,
+                    icon: Icons.person_outline_rounded,
+                    onTap: _openSettings,
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => _goToTab(1),
+                child: Container(
+                  height: 48,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surface.withValues(alpha: 0.75),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: colorScheme.outlineVariant),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.search_rounded,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          t('home_search_hint'),
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(color: colorScheme.onSurfaceVariant),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            if (!hasTmdbKey)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 22, 14, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      t('discover_feed_missing_key'),
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.tonal(
+                      onPressed: _openSettings,
+                      child: Text(t('catalog_open_settings')),
+                    ),
+                  ],
+                ),
+              )
+            else if (_isLoadingDiscover && heroMovies.isEmpty)
+              const SizedBox(
+                height: 220,
+                child: Center(
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(strokeWidth: 2.2),
+                  ),
+                ),
+              )
+            else if (heroMovies.isEmpty)
+              SizedBox(
+                height: 220,
+                child: Center(
+                  child: Text(
+                    t('discover_feed_empty'),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              )
+            else ...[
+              SizedBox(
+                height: 236,
+                child: PageView.builder(
+                  controller: _homeCarouselController,
+                  itemCount: heroMovies.length,
+                  itemBuilder: (context, index) {
+                    final movie = heroMovies[index];
+                    final posterUrl = movie.posterUrl ?? '';
+
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 7),
+                      child: GestureDetector(
+                        onTap: () => _showDiscoverMovieDetails(movie),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(26),
+                            border: Border.all(
+                              color: colorScheme.outlineVariant.withValues(
+                                alpha: 0.5,
+                              ),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.26),
+                                blurRadius: 24,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(26),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                if (posterUrl.isNotEmpty)
+                                  Image.network(
+                                    posterUrl,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, __, ___) =>
+                                        _emptyDiscoverPoster(),
+                                  )
+                                else
+                                  ColoredBox(
+                                    color: colorScheme.surfaceContainerHighest,
+                                    child: _emptyDiscoverPoster(),
+                                  ),
+                                Container(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                      colors: [
+                                        Colors.black.withValues(alpha: 0.08),
+                                        Colors.black.withValues(alpha: 0.82),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  left: 12,
+                                  top: 12,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: accent.withValues(alpha: 0.17),
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(
+                                        color: accent.withValues(alpha: 0.34),
+                                      ),
+                                    ),
+                                    child: Text(
+                                      t('home_featured_label'),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: accent,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 12,
+                                  top: 12,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.45,
+                                      ),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      movie.voteAverage > 0
+                                          ? 'TMDB ${movie.voteAverage.toStringAsFixed(1)}'
+                                          : t('catalog_year_unknown'),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .labelSmall
+                                          ?.copyWith(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  left: 14,
+                                  right: 14,
+                                  bottom: 14,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        movie.title,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleLarge
+                                            ?.copyWith(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        movie.year.isEmpty ? '-' : movie.year,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              color: Colors.white.withValues(
+                                                alpha: 0.88,
+                                              ),
+                                            ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(heroMovies.length, (index) {
+                  final active = _homeCarouselIndex == index;
+                  return AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: active ? 18 : 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: active ? accent : colorScheme.outlineVariant,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  );
+                }),
+              ),
+            ],
+            const SizedBox(height: 18),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+              child: Text(
+                t('drawer_genres'),
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+              ),
+            ),
+            SizedBox(
+              height: 46,
+              child: ListView(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                scrollDirection: Axis.horizontal,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text(t('drawer_all_genres')),
+                      selected: _selectedDiscoverGenreId == null,
+                      selectedColor: accent.withValues(alpha: 0.2),
+                      onSelected: (_) {
+                        setState(() {
+                          _selectedDiscoverGenreId = null;
+                        });
+                        _tabController.animateTo(1);
+                      },
+                    ),
+                  ),
+                  ...genreEntries.map(
+                    (genreEntry) => Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        label: Text(genreEntry.value),
+                        selected: _selectedDiscoverGenreId == genreEntry.key,
+                        selectedColor: accent.withValues(alpha: 0.2),
+                        onSelected: (_) {
+                          setState(() {
+                            _selectedDiscoverGenreId = genreEntry.key;
+                          });
+                          _tabController.animateTo(1);
+                        },
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      t('home_popular_title'),
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if (hasTmdbKey)
+                    TextButton(
+                      onPressed: () => _goToTab(1),
+                      child: Text(t('home_see_all')),
+                    ),
+                ],
+              ),
+            ),
+            if (!hasTmdbKey || popularMovies.isEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: colorScheme.surface.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: colorScheme.outlineVariant),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      t('discover_feed_empty'),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+              )
+            else
+              SizedBox(
+                height: 252,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  itemCount: popularMovies.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 12),
+                  itemBuilder: (context, index) {
+                    final movie = popularMovies[index];
+                    return SizedBox(
+                      width: 154,
+                      child: GestureDetector(
+                        onTap: () => _showDiscoverMovieDetails(movie),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: colorScheme.surface,
+                            borderRadius: BorderRadius.circular(18),
+                            border: Border.all(
+                              color: colorScheme.outlineVariant,
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: ClipRRect(
+                                  borderRadius: const BorderRadius.vertical(
+                                    top: Radius.circular(18),
+                                  ),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      _SearchPoster(
+                                        posterUrl: movie.posterUrl,
+                                        width: double.infinity,
+                                        height: double.infinity,
+                                      ),
+                                      Positioned(
+                                        top: 8,
+                                        right: 8,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 7,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.62,
+                                            ),
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
+                                          ),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(
+                                                Icons.star_rounded,
+                                                size: 12,
+                                                color: Color(0xFFFFB322),
+                                              ),
+                                              const SizedBox(width: 2),
+                                              Text(
+                                                movie.voteAverage > 0
+                                                    ? movie.voteAverage
+                                                          .toStringAsFixed(1)
+                                                    : '-',
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .labelSmall
+                                                    ?.copyWith(
+                                                      color: Colors.white,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                    ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  10,
+                                  8,
+                                  10,
+                                  10,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      movie.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleSmall
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      movie.year.isEmpty ? '-' : movie.year,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            if (genreEntries.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              ...genreEntries.take(2).map((genreEntry) {
+                final genreMovies = _discoverMovies
+                    .where((movie) => movie.genreIds.contains(genreEntry.key))
+                    .take(10)
+                    .toList();
+                if (genreMovies.isEmpty) {
+                  return const SizedBox.shrink();
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                genreEntry.value,
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () {
+                                setState(() {
+                                  _selectedDiscoverGenreId = genreEntry.key;
+                                });
+                                _goToTab(1);
+                              },
+                              child: Text(t('home_see_all')),
+                            ),
+                          ],
+                        ),
+                      ),
+                      SizedBox(
+                        height: 210,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          itemCount: genreMovies.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(width: 12),
+                          itemBuilder: (context, index) {
+                            final movie = genreMovies[index];
+                            return SizedBox(
+                              width: 130,
+                              child: GestureDetector(
+                                onTap: () => _showDiscoverMovieDetails(movie),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Expanded(
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(14),
+                                        child: _SearchPoster(
+                                          posterUrl: movie.posterUrl,
+                                          width: double.infinity,
+                                          height: double.infinity,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      movie.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWatchlistTab(BuildContext context) {
+    String t(String key) => AppStrings.text(context, key);
+    final watchlist = _watchlistMovies();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(2, 0, 2, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  t('discover_feed_title'),
-                  style: Theme.of(
-                    context,
-                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  t('discover_feed_desc'),
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
-            ),
+          Text(
+            '${t('watchlist_title')} (${watchlist.length})',
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
           ),
+          const SizedBox(height: 10),
           Expanded(
-            child: Builder(
-              builder: (context) {
-                if (!hasTmdbKey) {
-                  return Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          t('discover_feed_missing_key'),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 8),
-                        FilledButton.tonal(
-                          onPressed: _openSettings,
-                          child: Text(t('catalog_open_settings')),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-
-                if (_isLoadingDiscover) {
-                  return Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const SizedBox(
-                          width: 24,
-                          height: 24,
-                          child: CircularProgressIndicator(strokeWidth: 2.2),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(t('discover_feed_loading')),
-                      ],
-                    ),
-                  );
-                }
-
-                if (_discoverMovies.isEmpty) {
-                  return Center(
+            child: watchlist.isEmpty
+                ? Center(
                     child: Text(
-                      t('discover_feed_empty'),
+                      t('watchlist_empty'),
                       textAlign: TextAlign.center,
                     ),
-                  );
-                }
-
-                return RefreshIndicator(
-                  onRefresh: _loadDiscoverMovies,
-                  child: ListView.separated(
-                    itemCount: _discoverMovies.length,
+                  )
+                : ListView.separated(
+                    itemCount: watchlist.length,
                     separatorBuilder: (_, __) => const SizedBox(height: 10),
                     itemBuilder: (context, index) {
-                      final movie = _discoverMovies[index];
-
+                      final movie = watchlist[index];
                       return DecoratedBox(
                         decoration: BoxDecoration(
                           color: Theme.of(context).colorScheme.surface,
@@ -1477,7 +2311,7 @@ class _MovieListPageState extends State<MovieListPage>
                           ),
                         ),
                         child: ListTile(
-                          onTap: () => _showDiscoverMovieDetails(movie),
+                          onTap: () => _showWatchlistMovieDetails(movie),
                           contentPadding: const EdgeInsets.fromLTRB(
                             10,
                             8,
@@ -1494,149 +2328,37 @@ class _MovieListPageState extends State<MovieListPage>
                                 ? movie.title
                                 : '${movie.title} (${movie.year})',
                           ),
-                          subtitle: Text(t('catalog_open_details')),
+                          subtitle: Text(t('watchlist_subtitle')),
                           trailing: const Icon(Icons.chevron_right),
                         ),
                       );
                     },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
     );
   }
 
-  Drawer _buildDrawer(BuildContext context) {
-    String t(String key) => AppStrings.text(context, key);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+  Widget _homeIconButton({
+    required BuildContext context,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
 
-    return Drawer(
-      child: SafeArea(
-        child: Column(
-          children: [
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-              padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
-              decoration: BoxDecoration(
-                color: isDark
-                    ? const Color(0xFF1E242F)
-                    : const Color(0xFFF7D365),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? Colors.black.withValues(alpha: 0.32)
-                          : Colors.white,
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.movie_filter_rounded),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          t('app_brand'),
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          t('drawer_subtitle'),
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(height: 1, indent: 12, endIndent: 12),
-            ListTile(
-              leading: const Icon(Icons.grid_view_rounded),
-              title: Text(t('tab_watched')),
-              onTap: () => _goToTab(0),
-            ),
-            ListTile(
-              leading: const Icon(Icons.travel_explore_outlined),
-              title: Text(t('tab_discover')),
-              onTap: () => _goToTab(1),
-            ),
-            ListTile(
-              leading: const Icon(Icons.explore_outlined),
-              title: Text(t('tab_discover_feed')),
-              onTap: () => _goToTab(2),
-            ),
-            ListTile(
-              leading: const Icon(Icons.add_box_outlined),
-              title: Text(t('manual_add_movie')),
-              onTap: () {
-                Navigator.pop(context);
-                _addMovie();
-              },
-            ),
-            ExpansionTile(
-              leading: const Icon(Icons.category_outlined),
-              title: Text(t('drawer_genres')),
-              shape: const Border(),
-              collapsedShape: const Border(),
-              children: [
-                ListTile(
-                  title: Text(t('drawer_all_genres')),
-                  selected: _selectedGenre == null,
-                  onTap: () => _setGenreFilter(null),
-                ),
-                ..._availableGenres.map(
-                  (genre) => ListTile(
-                    title: Text(genre),
-                    selected: _selectedGenre == genre,
-                    onTap: () => _setGenreFilter(genre),
-                  ),
-                ),
-              ],
-            ),
-            ExpansionTile(
-              leading: const Icon(Icons.label_outline_rounded),
-              title: Text(t('drawer_categories')),
-              shape: const Border(),
-              collapsedShape: const Border(),
-              children: [
-                ListTile(
-                  title: Text(t('drawer_all_categories')),
-                  selected: _selectedCategory == null,
-                  onTap: () => _setCategoryFilter(null),
-                ),
-                ..._availableCategories(context).map(
-                  (category) => ListTile(
-                    title: Text(category),
-                    selected: _selectedCategory == category,
-                    onTap: () => _setCategoryFilter(category),
-                  ),
-                ),
-              ],
-            ),
-            const Spacer(),
-            const Divider(height: 1, indent: 12, endIndent: 12),
-            ListTile(
-              leading: const Icon(Icons.settings_outlined),
-              title: Text(t('settings')),
-              onTap: () {
-                Navigator.pop(context);
-                _openSettings();
-              },
-            ),
-          ],
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: colorScheme.surface.withValues(alpha: 0.7),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: colorScheme.outlineVariant),
         ),
+        child: Icon(icon, color: colorScheme.onSurfaceVariant),
       ),
     );
   }
@@ -1645,99 +2367,79 @@ class _MovieListPageState extends State<MovieListPage>
   Widget build(BuildContext context) {
     String t(String key) => AppStrings.text(context, key);
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final topBg = isDark ? const Color(0xFF111720) : const Color(0xFFFFF4CF);
-    final bottomBg = isDark ? const Color(0xFF0D1219) : const Color(0xFFF7F1E1);
+    final topBg = isDark ? const Color(0xFF131932) : const Color(0xFFEFF4FB);
+    final bottomBg = isDark ? const Color(0xFF0A0F1F) : const Color(0xFFE7EEF8);
 
     return Scaffold(
-      drawer: _buildDrawer(context),
-      appBar: AppBar(
-        leading: Builder(
-          builder: (context) {
-            return IconButton(
-              onPressed: () => _openDrawer(context),
-              icon: const Icon(Icons.menu_rounded),
-            );
-          },
-        ),
-        title: Text(
-          t('app_brand'),
-          style: Theme.of(
-            context,
-          ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-        ),
-        actions: [
-          PopupMenuButton<String>(
-            tooltip: t('select_sort'),
-            onSelected: (value) {
-              switch (value) {
-                case 'rating_desc':
-                  _updateSorting(MovieSortField.rating, SortDirection.desc);
-                  break;
-                case 'rating_asc':
-                  _updateSorting(MovieSortField.rating, SortDirection.asc);
-                  break;
-                case 'title_asc':
-                  _updateSorting(MovieSortField.title, SortDirection.asc);
-                  break;
-                case 'category_asc':
-                  _updateSorting(MovieSortField.category, SortDirection.asc);
-                  break;
-                case 'watched_desc':
-                  _updateSorting(MovieSortField.watchedAt, SortDirection.desc);
-                  break;
-              }
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                value: 'rating_desc',
-                child: Text(t('rating_desc')),
-              ),
-              PopupMenuItem(value: 'rating_asc', child: Text(t('rating_asc'))),
-              PopupMenuItem(value: 'title_asc', child: Text(t('title_asc'))),
-              PopupMenuItem(
-                value: 'category_asc',
-                child: Text(t('category_asc')),
-              ),
-              PopupMenuItem(
-                value: 'watched_desc',
-                child: Text(t('last_watched')),
-              ),
-            ],
-            icon: const Icon(Icons.sort),
-          ),
-          const SizedBox(width: 4),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(56),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: TabBar(
-                controller: _tabController,
-                indicator: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primary,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                dividerColor: Colors.transparent,
-                indicatorSize: TabBarIndicatorSize.tab,
-                labelColor: Theme.of(context).colorScheme.onPrimary,
-                unselectedLabelColor: Theme.of(
+      appBar: (_currentTab == 0 || _currentTab == 4)
+          ? null
+          : AppBar(
+              title: Text(
+                switch (_currentTab) {
+                  1 => t('tab_discover'),
+                  2 => t('tab_watched'),
+                  3 => t('watchlist_title'),
+                  _ => t('app_brand'),
+                },
+                style: Theme.of(
                   context,
-                ).colorScheme.onSurfaceVariant,
-                tabs: [
-                  Tab(text: t('tab_watched')),
-                  Tab(text: t('tab_discover')),
-                  Tab(text: t('tab_discover_feed')),
-                ],
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
               ),
+              actions: [
+                if (_currentTab == 2)
+                  PopupMenuButton<String>(
+                    tooltip: t('select_sort'),
+                    onSelected: (value) {
+                      switch (value) {
+                        case 'rating_desc':
+                          _updateSorting(
+                            MovieSortField.rating,
+                            SortDirection.desc,
+                          );
+                          break;
+                        case 'rating_asc':
+                          _updateSorting(
+                            MovieSortField.rating,
+                            SortDirection.asc,
+                          );
+                          break;
+                        case 'title_asc':
+                          _updateSorting(
+                            MovieSortField.title,
+                            SortDirection.asc,
+                          );
+                          break;
+                        case 'watched_desc':
+                          _updateSorting(
+                            MovieSortField.watchedAt,
+                            SortDirection.desc,
+                          );
+                          break;
+                      }
+                    },
+                    itemBuilder: (context) => [
+                      PopupMenuItem(
+                        value: 'rating_desc',
+                        child: Text(t('rating_desc')),
+                      ),
+                      PopupMenuItem(
+                        value: 'rating_asc',
+                        child: Text(t('rating_asc')),
+                      ),
+                      PopupMenuItem(
+                        value: 'title_asc',
+                        child: Text(t('title_asc')),
+                      ),
+                      PopupMenuItem(
+                        value: 'watched_desc',
+                        child: Text(t('last_watched')),
+                      ),
+                    ],
+                    icon: const Icon(Icons.sort),
+                  ),
+                const SizedBox(width: 4),
+              ],
             ),
-          ),
-        ),
-      ),
       body: Container(
         decoration: BoxDecoration(
           gradient: LinearGradient(
@@ -1749,75 +2451,85 @@ class _MovieListPageState extends State<MovieListPage>
         child: Stack(
           children: [
             Positioned(
-              left: -70,
-              top: -40,
+              left: -95,
+              top: -60,
+              child: _backgroundBubble(
+                size: 240,
+                color: const Color(0xFF1ED2E8).withValues(alpha: 0.12),
+              ),
+            ),
+            Positioned(
+              right: -70,
+              top: 150,
               child: _backgroundBubble(
                 size: 180,
-                color: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.07),
+                color: const Color(0xFF6B72FF).withValues(alpha: 0.12),
               ),
             ),
             Positioned(
-              right: -60,
-              top: 160,
+              right: -70,
+              bottom: -45,
               child: _backgroundBubble(
-                size: 150,
-                color: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.05),
-              ),
-            ),
-            Positioned(
-              right: -40,
-              bottom: -40,
-              child: _backgroundBubble(
-                size: 140,
-                color: Theme.of(
-                  context,
-                ).colorScheme.primary.withValues(alpha: 0.06),
+                size: 210,
+                color: const Color(0xFF1ED2E8).withValues(alpha: 0.09),
               ),
             ),
             TabBarView(
               controller: _tabController,
               children: [
-                _buildWatchedTab(context),
+                _buildHomeTab(context),
                 _buildDiscoverTab(context),
-                _buildDiscoverFeedTab(context),
+                _buildWatchedTab(context),
+                _buildWatchlistTab(context),
+                const SettingsPage(),
               ],
             ),
           ],
         ),
       ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
-      floatingActionButton: _currentTab == 0
-          ? FloatingActionButton.extended(
-              onPressed: _addMovie,
-              icon: const Icon(Icons.add),
-              label: Text(t('manual_add_movie')),
-            )
-          : null,
       bottomNavigationBar: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 0, 22, 8),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(3, (index) {
-              final active = _currentTab == index;
-              return AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: active ? 18 : 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: active
-                      ? Theme.of(context).colorScheme.primary
-                      : Theme.of(context).colorScheme.outlineVariant,
-                  borderRadius: BorderRadius.circular(999),
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: Theme.of(
+                context,
+              ).colorScheme.surface.withValues(alpha: isDark ? 0.78 : 0.92),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
+              ),
+            ),
+            child: Row(
+              children: [
+                _BottomTabItem(
+                  icon: Icons.home_rounded,
+                  selected: _currentTab == 0,
+                  onTap: () => _goToTab(0),
                 ),
-              );
-            }),
+                _BottomTabItem(
+                  icon: Icons.search_rounded,
+                  selected: _currentTab == 1,
+                  onTap: () => _goToTab(1),
+                ),
+                _BottomTabItem(
+                  icon: Icons.movie_filter_rounded,
+                  selected: _currentTab == 2,
+                  onTap: () => _goToTab(2),
+                ),
+                _BottomTabItem(
+                  icon: Icons.bookmark_rounded,
+                  selected: _currentTab == 3,
+                  onTap: () => _goToTab(3),
+                ),
+                _BottomTabItem(
+                  icon: Icons.person_rounded,
+                  selected: _currentTab == 4,
+                  onTap: () => _goToTab(4),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1829,6 +2541,719 @@ class _MovieListPageState extends State<MovieListPage>
       width: size,
       height: size,
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+  }
+}
+
+class _CatalogPreviewData {
+  final String title;
+  final String year;
+  final String? posterUrl;
+  final String genre;
+  final String director;
+  final String runtime;
+  final String plot;
+  final double? imdbRating;
+  final String rottenTomatoesRating;
+  final double? tmdbRating;
+  final String imdbId;
+
+  const _CatalogPreviewData({
+    required this.title,
+    this.year = '',
+    this.posterUrl,
+    this.genre = '',
+    this.director = '',
+    this.runtime = '',
+    this.plot = '',
+    this.imdbRating,
+    this.rottenTomatoesRating = '',
+    this.tmdbRating,
+    this.imdbId = '',
+  });
+
+  _CatalogPreviewData copyWith({
+    String? title,
+    String? year,
+    String? posterUrl,
+    String? genre,
+    String? director,
+    String? runtime,
+    String? plot,
+    double? imdbRating,
+    String? rottenTomatoesRating,
+    double? tmdbRating,
+    String? imdbId,
+  }) {
+    return _CatalogPreviewData(
+      title: title ?? this.title,
+      year: year ?? this.year,
+      posterUrl: posterUrl ?? this.posterUrl,
+      genre: genre ?? this.genre,
+      director: director ?? this.director,
+      runtime: runtime ?? this.runtime,
+      plot: plot ?? this.plot,
+      imdbRating: imdbRating ?? this.imdbRating,
+      rottenTomatoesRating: rottenTomatoesRating ?? this.rottenTomatoesRating,
+      tmdbRating: tmdbRating ?? this.tmdbRating,
+      imdbId: imdbId ?? this.imdbId,
+    );
+  }
+}
+
+class _CatalogMoviePreviewPage extends StatelessWidget {
+  final _CatalogPreviewData initialData;
+  final Future<_CatalogPreviewData> detailsFuture;
+  final String primaryActionLabel;
+  final bool primaryActionEnabled;
+  final Future<void> Function(_CatalogPreviewData data)? onFavoriteTap;
+
+  const _CatalogMoviePreviewPage({
+    required this.initialData,
+    required this.detailsFuture,
+    required this.primaryActionLabel,
+    required this.primaryActionEnabled,
+    this.onFavoriteTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    String t(String key) => AppStrings.text(context, key);
+    const primaryAction = Color(0xFFFFB322);
+
+    return Scaffold(
+      body: FutureBuilder<_CatalogPreviewData>(
+        future: detailsFuture,
+        initialData: initialData,
+        builder: (context, snapshot) {
+          final data = snapshot.data ?? initialData;
+          final posterUrl = (data.posterUrl ?? '').trim();
+          final colorScheme = Theme.of(context).colorScheme;
+          final metaTextStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: Colors.white.withValues(alpha: 0.82),
+            fontWeight: FontWeight.w600,
+          );
+
+          return Stack(
+            children: [
+              Positioned.fill(
+                child: posterUrl.isNotEmpty
+                    ? Image.network(
+                        posterUrl,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => ColoredBox(
+                          color: colorScheme.surfaceContainerHighest,
+                        ),
+                      )
+                    : ColoredBox(color: colorScheme.surfaceContainerHighest),
+              ),
+              Positioned.fill(
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+                  child: Container(color: Colors.black.withValues(alpha: 0.5)),
+                ),
+              ),
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.black.withValues(alpha: 0.2),
+                        const Color(0xFF0E1020).withValues(alpha: 0.84),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              SafeArea(
+                child: CustomScrollView(
+                  slivers: [
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
+                        child: Row(
+                          children: [
+                            _previewTopButton(
+                              icon: Icons.arrow_back_ios_new_rounded,
+                              onTap: () => Navigator.pop(context),
+                            ),
+                            const Spacer(),
+                            Expanded(
+                              flex: 5,
+                              child: Text(
+                                data.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                                style: Theme.of(context).textTheme.titleLarge
+                                    ?.copyWith(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                              ),
+                            ),
+                            const Spacer(),
+                            if (onFavoriteTap != null)
+                              _previewTopButton(
+                                icon: Icons.bookmark_add_rounded,
+                                onTap: () async {
+                                  await onFavoriteTap!.call(data);
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                  }
+                                },
+                              )
+                            else
+                              const SizedBox(width: 38, height: 38),
+                          ],
+                        ),
+                      ),
+                    ),
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(18, 0, 18, 28),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Center(
+                              child: Container(
+                                width: 232,
+                                height: 332,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(28),
+                                  border: Border.all(
+                                    color: Colors.white.withValues(alpha: 0.25),
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.48,
+                                      ),
+                                      blurRadius: 32,
+                                      offset: const Offset(0, 16),
+                                    ),
+                                  ],
+                                ),
+                                clipBehavior: Clip.antiAlias,
+                                child: posterUrl.isNotEmpty
+                                    ? Image.network(
+                                        posterUrl,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) =>
+                                            _previewPosterFallback(context),
+                                      )
+                                    : _previewPosterFallback(context),
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            Center(
+                              child: Wrap(
+                                spacing: 14,
+                                runSpacing: 8,
+                                alignment: WrapAlignment.center,
+                                crossAxisAlignment: WrapCrossAlignment.center,
+                                children: [
+                                  if (data.year.isNotEmpty) ...[
+                                    const Icon(
+                                      Icons.calendar_month_outlined,
+                                      size: 14,
+                                      color: Colors.white70,
+                                    ),
+                                    Text(data.year, style: metaTextStyle),
+                                  ],
+                                  if (data.runtime.isNotEmpty) ...[
+                                    const Icon(
+                                      Icons.schedule_rounded,
+                                      size: 14,
+                                      color: Colors.white70,
+                                    ),
+                                    Text(data.runtime, style: metaTextStyle),
+                                  ],
+                                  if (data.genre.isNotEmpty) ...[
+                                    const Icon(
+                                      Icons.local_movies_outlined,
+                                      size: 14,
+                                      color: Colors.white70,
+                                    ),
+                                    Text(data.genre, style: metaTextStyle),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Center(
+                              child: Wrap(
+                                spacing: 10,
+                                runSpacing: 8,
+                                children: [
+                                  if (data.imdbRating != null)
+                                    _previewSourceBadge(
+                                      context: context,
+                                      icon: FontAwesomeIcons.imdb,
+                                      value: data.imdbRating!.toStringAsFixed(
+                                        1,
+                                      ),
+                                      background: const Color(0xFFF5C74C),
+                                      foreground: const Color(0xFF3A2A00),
+                                    )
+                                  else if (data.tmdbRating != null)
+                                    _previewSourceBadge(
+                                      context: context,
+                                      icon: Icons.star_rounded,
+                                      value: data.tmdbRating!.toStringAsFixed(
+                                        1,
+                                      ),
+                                      background: const Color(0xFFFFB322),
+                                      foreground: const Color(0xFF3A2A00),
+                                    ),
+                                  if (data.rottenTomatoesRating.isNotEmpty)
+                                    _previewSourceBadge(
+                                      context: context,
+                                      icon: Icons.percent_rounded,
+                                      value: data.rottenTomatoesRating,
+                                      background: const Color(0xFFEF5851),
+                                      foreground: Colors.white,
+                                    ),
+                                ],
+                              ),
+                            ),
+                            if (snapshot.connectionState ==
+                                ConnectionState.waiting) ...[
+                              const SizedBox(height: 14),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    t('catalog_loading_details'),
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.88,
+                                          ),
+                                        ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                            const SizedBox(height: 18),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: FilledButton.icon(
+                                    onPressed: primaryActionEnabled
+                                        ? () => Navigator.pop(context, true)
+                                        : null,
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: primaryAction,
+                                      foregroundColor: const Color(0xFF352300),
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 14,
+                                      ),
+                                    ),
+                                    icon: Icon(
+                                      primaryActionEnabled
+                                          ? Icons.playlist_add_rounded
+                                          : Icons.check_rounded,
+                                    ),
+                                    label: Text(primaryActionLabel),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                _previewRoundAction(
+                                  icon: Icons.ios_share_rounded,
+                                  onTap: () =>
+                                      _shareImdbLink(context, data.imdbId),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 20),
+                            Text(
+                              t('plot'),
+                              style: Theme.of(context).textTheme.titleLarge
+                                  ?.copyWith(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              data.plot.isEmpty ? '-' : data.plot,
+                              style: Theme.of(context).textTheme.bodyLarge
+                                  ?.copyWith(
+                                    color: Colors.white.withValues(alpha: 0.9),
+                                    height: 1.4,
+                                  ),
+                            ),
+                            const SizedBox(height: 14),
+                            if (data.director.isNotEmpty)
+                              _previewInfoRow(
+                                context,
+                                t('director'),
+                                data.director,
+                              ),
+                            if (data.genre.isNotEmpty)
+                              _previewInfoRow(context, t('genre'), data.genre),
+                            const SizedBox(height: 18),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _shareImdbLink(BuildContext context, String imdbId) async {
+    final trimmedId = imdbId.trim();
+    if (trimmedId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(AppStrings.text(context, 'share_no_imdb_link'))),
+      );
+      return;
+    }
+    await Share.share('https://www.imdb.com/title/$trimmedId/');
+  }
+
+  Widget _previewTopButton({
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+        ),
+        child: Icon(icon, color: Colors.white, size: 18),
+      ),
+    );
+  }
+
+  Widget _previewRoundAction({
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: Container(
+        width: 46,
+        height: 46,
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A3250).withValues(alpha: 0.9),
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white.withValues(alpha: 0.16)),
+        ),
+        child: Icon(icon, color: const Color(0xFF1ED2E8), size: 20),
+      ),
+    );
+  }
+
+  Widget _previewSourceBadge({
+    required BuildContext context,
+    required IconData icon,
+    required String value,
+    required Color background,
+    required Color foreground,
+  }) {
+    final isFontAwesome = icon.fontPackage == 'font_awesome_flutter';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          isFontAwesome
+              ? FaIcon(icon, size: 13, color: foreground)
+              : Icon(icon, size: 15, color: foreground),
+          const SizedBox(width: 6),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.labelLarge?.copyWith(
+              color: foreground,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _previewPosterFallback(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            Theme.of(context).colorScheme.surfaceContainerHighest,
+            Theme.of(context).colorScheme.surfaceContainerHighest,
+          ],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
+      child: Center(
+        child: Icon(
+          Icons.movie_creation_outlined,
+          size: 52,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
+  Widget _previewInfoRow(BuildContext context, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Text(
+        '$label: $value',
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Colors.white.withValues(alpha: 0.92),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickMovieRatingPage extends StatefulWidget {
+  final _CatalogPreviewData data;
+  final double initialRating;
+  final String actionLabel;
+
+  const _QuickMovieRatingPage({
+    required this.data,
+    required this.initialRating,
+    required this.actionLabel,
+  });
+
+  @override
+  State<_QuickMovieRatingPage> createState() => _QuickMovieRatingPageState();
+}
+
+class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
+  late double _rating;
+
+  @override
+  void initState() {
+    super.initState();
+    _rating = widget.initialRating.clamp(0.5, 5.0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: (widget.data.posterUrl ?? '').trim().isNotEmpty
+                ? Image.network(
+                    widget.data.posterUrl!,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        ColoredBox(color: colorScheme.surfaceContainerHighest),
+                  )
+                : ColoredBox(color: colorScheme.surfaceContainerHighest),
+          ),
+          Positioned.fill(
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+              child: Container(color: Colors.black.withValues(alpha: 0.62)),
+            ),
+          ),
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 18),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(
+                          Icons.arrow_back_ios_new_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const Spacer(),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 18),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.2),
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        Row(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: _SearchPoster(
+                                posterUrl: widget.data.posterUrl,
+                                width: 80,
+                                height: 118,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    widget.data.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleLarge
+                                        ?.copyWith(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  if (widget.data.year.isNotEmpty)
+                                    Text(
+                                      widget.data.year,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(color: Colors.white70),
+                                    ),
+                                  if (widget.data.imdbRating != null)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const FaIcon(
+                                          FontAwesomeIcons.imdb,
+                                          size: 12,
+                                          color: Color(0xFFF5C74C),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          widget.data.imdbRating!
+                                              .toStringAsFixed(1),
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodySmall
+                                              ?.copyWith(color: Colors.white70),
+                                        ),
+                                      ],
+                                    ),
+                                  if (widget
+                                      .data
+                                      .rottenTomatoesRating
+                                      .isNotEmpty)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(
+                                          Icons.percent_rounded,
+                                          size: 14,
+                                          color: Color(0xFFEF5851),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          widget.data.rottenTomatoesRating,
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .bodySmall
+                                              ?.copyWith(color: Colors.white70),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          AppStrings.text(context, 'personal_rating'),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                        ),
+                        const SizedBox(height: 12),
+                        RatingBar.builder(
+                          initialRating: _rating,
+                          minRating: 0.5,
+                          allowHalfRating: true,
+                          itemCount: 5,
+                          itemSize: 38,
+                          unratedColor: Colors.white24,
+                          itemPadding: const EdgeInsets.symmetric(
+                            horizontal: 2,
+                          ),
+                          itemBuilder: (context, _) => const Icon(
+                            Icons.star_rounded,
+                            color: Color(0xFFFFB322),
+                          ),
+                          onRatingUpdate: (value) {
+                            setState(() {
+                              _rating = value;
+                            });
+                          },
+                        ),
+                        Text(
+                          '${_rating.toStringAsFixed(1)} / 5',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(
+                                color: const Color(0xFFFFB322),
+                                fontWeight: FontWeight.w800,
+                              ),
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton(
+                            onPressed: () => Navigator.pop(context, _rating),
+                            child: Text(widget.actionLabel),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1872,6 +3297,54 @@ class _SearchPoster extends StatelessWidget {
         Icons.movie_creation_outlined,
         size: width * 0.48,
         color: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
+class _BottomTabItem extends StatelessWidget {
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _BottomTabItem({
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final accent = const Color(0xFF1ED2E8);
+
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            decoration: BoxDecoration(
+              color: selected
+                  ? accent.withValues(alpha: 0.2)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: 20,
+                  color: selected ? accent : colorScheme.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

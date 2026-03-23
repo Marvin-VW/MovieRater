@@ -47,6 +47,8 @@ class DiscoverMovie {
   final String? posterUrl;
   final String overview;
   final double voteAverage;
+  final double popularity;
+  final List<int> genreIds;
 
   const DiscoverMovie({
     required this.tmdbId,
@@ -55,6 +57,8 @@ class DiscoverMovie {
     this.posterUrl,
     this.overview = '',
     this.voteAverage = 0,
+    this.popularity = 0,
+    this.genreIds = const [],
   });
 }
 
@@ -220,7 +224,18 @@ class MovieMetadataService {
       final year = releaseDate.length >= 4 ? releaseDate.substring(0, 4) : '';
       final overview = _sanitize(item['overview']) ?? '';
       final voteAverage = _parseDouble(item['vote_average']) ?? 0;
+      final popularity = _parseDouble(item['popularity']) ?? 0;
       final posterPath = _sanitize(item['poster_path']);
+      final genreIdsRaw = item['genre_ids'];
+      final genreIds = <int>[];
+      if (genreIdsRaw is List) {
+        for (final genreId in genreIdsRaw) {
+          final parsed = int.tryParse(genreId.toString());
+          if (parsed != null) {
+            genreIds.add(parsed);
+          }
+        }
+      }
 
       movies.add(
         DiscoverMovie(
@@ -229,6 +244,8 @@ class MovieMetadataService {
           year: year,
           overview: overview,
           voteAverage: voteAverage,
+          popularity: popularity,
+          genreIds: genreIds,
           posterUrl: posterPath == null
               ? null
               : 'https://image.tmdb.org/t/p/w500$posterPath',

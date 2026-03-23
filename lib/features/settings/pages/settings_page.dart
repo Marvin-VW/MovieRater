@@ -17,7 +17,6 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage> {
   final _omdbApiKeyController = TextEditingController();
   final _tmdbApiKeyController = TextEditingController();
-  final _newCategoryController = TextEditingController();
 
   bool _didInit = false;
   bool _showApiKeys = false;
@@ -43,7 +42,6 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _omdbApiKeyController.dispose();
     _tmdbApiKeyController.dispose();
-    _newCategoryController.dispose();
     super.dispose();
   }
 
@@ -64,18 +62,6 @@ class _SettingsPageState extends State<SettingsPage> {
       _omdbKeyValid = null;
       _tmdbKeyValid = null;
     });
-  }
-
-  Future<void> _addCategory() async {
-    final settings = AppSettingsScope.of(context);
-    final value = _newCategoryController.text.trim();
-    if (value.isEmpty) return;
-
-    await settings.addCustomCategory(value);
-    if (!mounted) return;
-
-    _newCategoryController.clear();
-    FocusScope.of(context).unfocus();
   }
 
   Future<void> _saveApiKeys() async {
@@ -199,14 +185,6 @@ class _SettingsPageState extends State<SettingsPage> {
         padding: const EdgeInsets.all(16),
         children: [
           Card(
-            child: SwitchListTile(
-              title: Text(t('dark_mode')),
-              subtitle: Text(t('dark_mode_desc')),
-              value: settings.darkModeEnabled,
-              onChanged: settings.setDarkMode,
-            ),
-          ),
-          Card(
             child: ListTile(
               leading: const Icon(Icons.language),
               title: Text(t('language')),
@@ -269,66 +247,6 @@ class _SettingsPageState extends State<SettingsPage> {
                       ),
                     ],
                   ),
-                ],
-              ),
-            ),
-          ),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    t('category_manage_title'),
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    t('category_manage_desc'),
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _newCategoryController,
-                          textInputAction: TextInputAction.done,
-                          onSubmitted: (_) => _addCategory(),
-                          decoration: InputDecoration(
-                            labelText: t('category_new_label'),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton.tonal(
-                        onPressed: _addCategory,
-                        child: Text(t('category_add')),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  if (settings.customCategories.isEmpty)
-                    Text(
-                      t('category_empty'),
-                      style: Theme.of(context).textTheme.bodySmall,
-                    )
-                  else
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: settings.customCategories
-                          .map(
-                            (category) => InputChip(
-                              label: Text(category),
-                              onDeleted: () {
-                                settings.removeCustomCategory(category);
-                              },
-                            ),
-                          )
-                          .toList(),
-                    ),
                 ],
               ),
             ),
