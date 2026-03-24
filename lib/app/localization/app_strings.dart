@@ -5,7 +5,7 @@ import '../settings/app_settings_controller.dart';
 class AppStrings {
   static const Map<String, Map<String, String>> _translations = {
     'de': {
-      'movie_list_title': 'Movie Rater',
+      'movie_list_title': 'CineCue',
       'app_brand': 'CineCue',
       'welcome_subtitle':
           'Dein Filmjournal mit smarter Suche, Postern und schnellen Bewertungen.',
@@ -238,7 +238,7 @@ class AppStrings {
       'api_help': 'API-Key gibt es kostenlos auf omdbapi.com',
     },
     'en': {
-      'movie_list_title': 'Movie Rater',
+      'movie_list_title': 'CineCue',
       'app_brand': 'CineCue',
       'welcome_subtitle':
           'Your movie journal with smart search, posters and fast ratings.',

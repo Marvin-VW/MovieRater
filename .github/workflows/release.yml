@@ -47,12 +47,6 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-
       - name: Determine release tag
         id: release_meta
         shell: bash
@@ -65,6 +59,26 @@ jobs:
           fi
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
+      - name: Prepare APK filename
+        id: apk_meta
+        shell: bash
+        run: |
+          if [[ -n "${{ steps.release_meta.outputs.tag }}" ]]; then
+            apk_name="CineCue-${{ steps.release_meta.outputs.tag }}.apk"
+          else
+            apk_name="CineCue-main-${GITHUB_SHA::7}.apk"
+          fi
+          apk_path="build/app/outputs/flutter-apk/${apk_name}"
+          cp build/app/outputs/flutter-apk/app-release.apk "${apk_path}"
+          echo "apk_name=${apk_name}" >> "${GITHUB_OUTPUT}"
+          echo "apk_path=${apk_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk_meta.outputs.apk_path }}
+
       - name: Publish GitHub Release
         if: steps.release_meta.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.create_release == 'true')
         uses: softprops/action-gh-release@v2
@@ -72,7 +86,7 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: ${{ steps.apk_meta.outputs.apk_path }}
 
   ios:
     name: iOS Build (no codesign)

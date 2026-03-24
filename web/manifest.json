@@ -1,6 +1,6 @@
 {
-    "name": "movie_rater",
-    "short_name": "movie_rater",
+    "name": "CineCue",
+    "short_name": "CineCue",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

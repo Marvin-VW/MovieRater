@@ -94,6 +94,7 @@ This repository includes GitHub Actions workflows:
   - Builds Android release APK
   - Publishes the APK to a GitHub Release (tag-based)
   - Runs an iOS build (`--no-codesign`) and uploads the build output as an artifact
+  - Uses branded APK names (`CineCue-<tag>.apk` on releases)
 
 ### Create a release build
 
