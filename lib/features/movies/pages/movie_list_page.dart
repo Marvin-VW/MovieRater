@@ -31,6 +31,8 @@ enum DiscoverSortField {
   titleDesc,
 }
 
+enum WatchlistSortField { addedDesc, titleAsc, ratingDesc }
+
 class _MovieListPageState extends State<MovieListPage>
     with SingleTickerProviderStateMixin {
   static const _watchlistTag = '__watchlist__';
@@ -57,6 +59,7 @@ class _MovieListPageState extends State<MovieListPage>
 
   final _searchController = TextEditingController();
   final _watchedSearchController = TextEditingController();
+  final _discoverSearchFocusNode = FocusNode();
   final _homeCarouselController = PageController(viewportFraction: 0.86);
 
   late final TabController _tabController;
@@ -71,6 +74,7 @@ class _MovieListPageState extends State<MovieListPage>
   int? _selectedDiscoverGenreId;
   bool _watchedListView = false;
   DiscoverSortField _discoverSortField = DiscoverSortField.popularityDesc;
+  WatchlistSortField _watchlistSortField = WatchlistSortField.addedDesc;
   int _homeCarouselIndex = 0;
   String _watchedSearchQuery = '';
   String _lastTmdbApiKey = '';
@@ -106,6 +110,7 @@ class _MovieListPageState extends State<MovieListPage>
     _searchDebounce?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _discoverSearchFocusNode.dispose();
     _watchedSearchController.removeListener(_onWatchedSearchChanged);
     _watchedSearchController.dispose();
     _homeCarouselController.removeListener(_onHomeCarouselChanged);
@@ -154,6 +159,22 @@ class _MovieListPageState extends State<MovieListPage>
     return _movies.where((movie) => _isWatchlistMovie(movie)).toList();
   }
 
+  List<Movie> _sortedWatchlistMovies() {
+    final watchlist = _watchlistMovies();
+    switch (_watchlistSortField) {
+      case WatchlistSortField.addedDesc:
+        watchlist.sort((a, b) => b.watchedAt.compareTo(a.watchedAt));
+        break;
+      case WatchlistSortField.titleAsc:
+        watchlist.sort((a, b) => a.title.compareTo(b.title));
+        break;
+      case WatchlistSortField.ratingDesc:
+        watchlist.sort((a, b) => b.rating.compareTo(a.rating));
+        break;
+    }
+    return watchlist;
+  }
+
   List<Movie> _filteredMovies(BuildContext context) {
     final query = _watchedSearchQuery.toLowerCase();
 
@@ -193,6 +214,7 @@ class _MovieListPageState extends State<MovieListPage>
   Future<void> _loadDiscoverMovies() async {
     final settings = AppSettingsScope.of(context);
     final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
 
     if (tmdbApiKey.isEmpty) {
       if (!mounted) return;
@@ -215,6 +237,7 @@ class _MovieListPageState extends State<MovieListPage>
     try {
       movies = await MovieMetadataService.discoverMovies(
         tmdbApiKey: tmdbApiKey,
+        languageCode: languageCode,
       );
     } on SocketException {
       movies = const [];
@@ -282,6 +305,148 @@ class _MovieListPageState extends State<MovieListPage>
       _sortDirection = direction;
     });
     _loadMovies();
+  }
+
+  Future<T?> _showSortModal<T>({
+    required String title,
+    required T currentValue,
+    required List<_SortOption<T>> options,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return showModalBottomSheet<T>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      showDragHandle: false,
+      builder: (sheetContext) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: colorScheme.surface,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: colorScheme.outlineVariant),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(height: 10),
+                  Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: colorScheme.outlineVariant,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+                    child: Text(
+                      title,
+                      style: Theme.of(sheetContext).textTheme.titleMedium
+                          ?.copyWith(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  ...options.map(
+                    (option) => ListTile(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      onTap: () => Navigator.pop(sheetContext, option.value),
+                      title: Text(option.label),
+                      trailing: option.value == currentValue
+                          ? Icon(
+                              Icons.check_circle,
+                              color: Theme.of(sheetContext).colorScheme.primary,
+                            )
+                          : const Icon(Icons.radio_button_unchecked),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openWatchedSortModal() async {
+    String t(String key) => AppStrings.text(context, key);
+    final currentKey = switch ((_sortField, _sortDirection)) {
+      (MovieSortField.rating, SortDirection.desc) => 'rating_desc',
+      (MovieSortField.rating, SortDirection.asc) => 'rating_asc',
+      (MovieSortField.title, SortDirection.asc) => 'title_asc',
+      (MovieSortField.watchedAt, SortDirection.desc) => 'watched_desc',
+      _ => 'rating_desc',
+    };
+    final selected = await _showSortModal<String>(
+      title: t('select_sort'),
+      currentValue: currentKey,
+      options: [
+        _SortOption('rating_desc', t('rating_desc')),
+        _SortOption('rating_asc', t('rating_asc')),
+        _SortOption('title_asc', t('title_asc')),
+        _SortOption('watched_desc', t('last_watched')),
+      ],
+    );
+    if (selected == null) return;
+    switch (selected) {
+      case 'rating_desc':
+        _updateSorting(MovieSortField.rating, SortDirection.desc);
+        break;
+      case 'rating_asc':
+        _updateSorting(MovieSortField.rating, SortDirection.asc);
+        break;
+      case 'title_asc':
+        _updateSorting(MovieSortField.title, SortDirection.asc);
+        break;
+      case 'watched_desc':
+        _updateSorting(MovieSortField.watchedAt, SortDirection.desc);
+        break;
+    }
+  }
+
+  Future<void> _openDiscoverSortModal() async {
+    String t(String key) => AppStrings.text(context, key);
+    final selected = await _showSortModal<DiscoverSortField>(
+      title: t('select_sort'),
+      currentValue: _discoverSortField,
+      options: [
+        _SortOption(
+          DiscoverSortField.popularityDesc,
+          t('sort_popularity_desc'),
+        ),
+        _SortOption(DiscoverSortField.popularityAsc, t('sort_popularity_asc')),
+        _SortOption(DiscoverSortField.ratingDesc, t('rating_desc')),
+        _SortOption(DiscoverSortField.ratingAsc, t('rating_asc')),
+        _SortOption(DiscoverSortField.titleAsc, t('title_asc')),
+        _SortOption(DiscoverSortField.titleDesc, t('sort_title_desc')),
+      ],
+    );
+    if (selected == null) return;
+    setState(() {
+      _discoverSortField = selected;
+    });
+  }
+
+  Future<void> _openWatchlistSortModal() async {
+    String t(String key) => AppStrings.text(context, key);
+    final selected = await _showSortModal<WatchlistSortField>(
+      title: t('select_sort'),
+      currentValue: _watchlistSortField,
+      options: [
+        _SortOption(WatchlistSortField.addedDesc, t('watchlist_sort_added')),
+        _SortOption(WatchlistSortField.titleAsc, t('watchlist_sort_title')),
+        _SortOption(WatchlistSortField.ratingDesc, t('watchlist_sort_rating')),
+      ],
+    );
+    if (selected == null) return;
+    setState(() {
+      _watchlistSortField = selected;
+    });
   }
 
   void _openSettings() {
@@ -356,6 +521,7 @@ class _MovieListPageState extends State<MovieListPage>
     final settings = AppSettingsScope.of(context);
     final omdbApiKey = settings.omdbApiKey.trim();
     final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
 
     setState(() {
       _addingImdbId = result.imdbId;
@@ -367,6 +533,7 @@ class _MovieListPageState extends State<MovieListPage>
         result.imdbId,
         omdbApiKey: omdbApiKey,
         tmdbApiKey: tmdbApiKey,
+        languageCode: languageCode,
       );
     }
 
@@ -408,6 +575,7 @@ class _MovieListPageState extends State<MovieListPage>
     final settings = AppSettingsScope.of(context);
     final omdbApiKey = settings.omdbApiKey.trim();
     final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
     final alreadyAdded = _isResultAlreadyAdded(result);
 
     final initialData = _CatalogPreviewData(
@@ -423,6 +591,7 @@ class _MovieListPageState extends State<MovieListPage>
                 result.imdbId,
                 omdbApiKey: omdbApiKey,
                 tmdbApiKey: tmdbApiKey,
+                languageCode: languageCode,
               )
               .then((metadata) {
                 return initialData.copyWith(
@@ -439,7 +608,7 @@ class _MovieListPageState extends State<MovieListPage>
               })
               .catchError((_) => initialData);
 
-    final shouldAdd = await Navigator.push<bool>(
+    await Navigator.push<void>(
       context,
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
@@ -449,19 +618,21 @@ class _MovieListPageState extends State<MovieListPage>
               ? AppStrings.text(context, 'catalog_already_added')
               : AppStrings.text(context, 'catalog_add_from_details'),
           primaryActionEnabled: !alreadyAdded,
+          onPrimaryAction: alreadyAdded
+              ? null
+              : (_) async {
+                  await _addFromSearchResult(result);
+                },
           onFavoriteTap: alreadyAdded ? null : _addToWatchlistFromPreview,
         ),
       ),
     );
-
-    if (shouldAdd == true) {
-      await _addFromSearchResult(result);
-    }
   }
 
   Future<void> _showDiscoverMovieDetails(DiscoverMovie movie) async {
     final settings = AppSettingsScope.of(context);
     final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
     if (tmdbApiKey.isEmpty) return;
 
     final initialDetails = TmdbMovieDetails(
@@ -485,6 +656,7 @@ class _MovieListPageState extends State<MovieListPage>
         MovieMetadataService.fetchTmdbMovieDetails(
               movie.tmdbId,
               tmdbApiKey: tmdbApiKey,
+              languageCode: languageCode,
             )
             .then((details) {
               loadedDetails = details;
@@ -502,7 +674,7 @@ class _MovieListPageState extends State<MovieListPage>
             })
             .catchError((_) => initialData);
 
-    final previewResult = await Navigator.push<bool>(
+    await Navigator.push<void>(
       context,
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
@@ -512,21 +684,24 @@ class _MovieListPageState extends State<MovieListPage>
               ? AppStrings.text(context, 'catalog_already_added')
               : AppStrings.text(context, 'catalog_add_from_details'),
           primaryActionEnabled: !_isTmdbSuggestionAlreadyAdded(initialDetails),
+          onPrimaryAction: _isTmdbSuggestionAlreadyAdded(initialDetails)
+              ? null
+              : (_) async {
+                  await _addFromTmdbDetails(loadedDetails ?? initialDetails);
+                },
           onFavoriteTap: _isTmdbSuggestionAlreadyAdded(initialDetails)
               ? null
               : _addToWatchlistFromPreview,
         ),
       ),
     );
-    if (previewResult != true) return;
-
-    await _addFromTmdbDetails(loadedDetails ?? initialDetails);
   }
 
   Future<void> _addFromTmdbDetails(TmdbMovieDetails details) async {
     final settings = AppSettingsScope.of(context);
     final omdbApiKey = settings.omdbApiKey.trim();
     final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
     final buttonKey = details.imdbId.isEmpty
         ? 'tmdb-${details.tmdbId}'
         : details.imdbId;
@@ -554,6 +729,7 @@ class _MovieListPageState extends State<MovieListPage>
         details.imdbId,
         omdbApiKey: omdbApiKey,
         tmdbApiKey: tmdbApiKey,
+        languageCode: languageCode,
       );
     }
 
@@ -621,6 +797,14 @@ class _MovieListPageState extends State<MovieListPage>
 
   void _goToTab(int index) {
     _tabController.animateTo(index);
+  }
+
+  void _goToDiscoverAndFocusSearch() {
+    _tabController.animateTo(1);
+    Future.delayed(const Duration(milliseconds: 220), () {
+      if (!mounted) return;
+      _discoverSearchFocusNode.requestFocus();
+    });
   }
 
   String _nowTimestamp() {
@@ -693,7 +877,6 @@ class _MovieListPageState extends State<MovieListPage>
       SnackBar(content: Text(AppStrings.text(context, 'movie_saved'))),
     );
     _loadMovies();
-    _tabController.animateTo(2);
   }
 
   Future<void> _addToWatchlistFromPreview(_CatalogPreviewData data) async {
@@ -725,7 +908,7 @@ class _MovieListPageState extends State<MovieListPage>
       genre: data.genre,
       director: data.director,
       runtime: data.runtime,
-      watchedAt: '',
+      watchedAt: _nowTimestamp(),
       watchPlatform: '',
       imdbRating: data.imdbRating,
       rottenTomatoesRating: data.rottenTomatoesRating,
@@ -806,7 +989,7 @@ class _MovieListPageState extends State<MovieListPage>
       imdbId: movie.imdbId,
     );
 
-    final wantsEdit = await Navigator.push<bool>(
+    await Navigator.push<void>(
       context,
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
@@ -814,18 +997,18 @@ class _MovieListPageState extends State<MovieListPage>
           detailsFuture: Future.value(data),
           primaryActionLabel: changeRatingLabel,
           primaryActionEnabled: true,
+          onPrimaryAction: (_) async {
+            final newRating = await _openQuickRatingEditor(
+              data: data,
+              initialRating: movie.rating,
+              actionLabel: changeRatingLabel,
+            );
+            if (newRating == null) return;
+            await _updateMovieRating(movie, newRating);
+          },
         ),
       ),
     );
-    if (wantsEdit != true) return;
-
-    final newRating = await _openQuickRatingEditor(
-      data: data,
-      initialRating: movie.rating,
-      actionLabel: changeRatingLabel,
-    );
-    if (newRating == null) return;
-    await _updateMovieRating(movie, newRating);
   }
 
   Future<void> _showWatchlistMovieDetails(Movie movie) async {
@@ -843,7 +1026,7 @@ class _MovieListPageState extends State<MovieListPage>
       imdbId: movie.imdbId,
     );
 
-    final wantsMark = await Navigator.push<bool>(
+    await Navigator.push<void>(
       context,
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
@@ -851,18 +1034,18 @@ class _MovieListPageState extends State<MovieListPage>
           detailsFuture: Future.value(data),
           primaryActionLabel: markWatchedLabel,
           primaryActionEnabled: true,
+          onPrimaryAction: (_) async {
+            final rating = await _openQuickRatingEditor(
+              data: data,
+              initialRating: 3.0,
+              actionLabel: markWatchedLabel,
+            );
+            if (rating == null) return;
+            await _markWatchlistMovieAsWatched(movie, rating);
+          },
         ),
       ),
     );
-    if (wantsMark != true) return;
-
-    final rating = await _openQuickRatingEditor(
-      data: data,
-      initialRating: 3.0,
-      actionLabel: markWatchedLabel,
-    );
-    if (rating == null) return;
-    await _markWatchlistMovieAsWatched(movie, rating);
   }
 
   Widget _buildPoster(Movie movie) {
@@ -974,11 +1157,11 @@ class _MovieListPageState extends State<MovieListPage>
                         foreground: const Color(0xFF3A2A00),
                       ),
                       _sourceRatingBadge(
-                        icon: Icons.percent_rounded,
+                        useRottenLogo: true,
                         value: movie.rottenTomatoesRating.isEmpty
                             ? '-'
                             : movie.rottenTomatoesRating,
-                        background: const Color(0xFFEF5851),
+                        background: const Color(0x88E6463D),
                         foreground: Colors.white,
                       ),
                     ],
@@ -1018,11 +1201,15 @@ class _MovieListPageState extends State<MovieListPage>
   }
 
   Widget _sourceRatingBadge({
-    required IconData icon,
+    IconData? icon,
+    bool useRottenLogo = false,
     required String value,
     required Color background,
     required Color foreground,
   }) {
+    final resolvedIcon = icon ?? Icons.circle;
+    final isFontAwesome = resolvedIcon.fontPackage == 'font_awesome_flutter';
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
@@ -1032,7 +1219,12 @@ class _MovieListPageState extends State<MovieListPage>
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          FaIcon(icon, size: 12, color: foreground),
+          if (useRottenLogo)
+            const _RottenTomatoMark(size: 12)
+          else if (isFontAwesome)
+            FaIcon(resolvedIcon, size: 12, color: foreground)
+          else
+            Icon(resolvedIcon, size: 14, color: foreground),
           const SizedBox(width: 4),
           Text(
             value,
@@ -1075,11 +1267,11 @@ class _MovieListPageState extends State<MovieListPage>
               foreground: const Color(0xFF3A2A00),
             ),
             _sourceRatingBadge(
-              icon: Icons.percent_rounded,
+              useRottenLogo: true,
               value: movie.rottenTomatoesRating.isEmpty
                   ? '-'
                   : movie.rottenTomatoesRating,
-              background: const Color(0xFFEF5851),
+              background: const Color(0x88E6463D),
               foreground: Colors.white,
             ),
           ],
@@ -1106,6 +1298,15 @@ class _MovieListPageState extends State<MovieListPage>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
+                child: Text(
+                  '${t('seen_panel_title')} (${movies.length})',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
               TextField(
                 controller: _watchedSearchController,
                 decoration: InputDecoration(
@@ -1123,15 +1324,8 @@ class _MovieListPageState extends State<MovieListPage>
               Padding(
                 padding: const EdgeInsets.fromLTRB(2, 0, 2, 8),
                 child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    Expanded(
-                      child: Text(
-                        '${t('seen_panel_title')} (${movies.length})',
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
                     if (movies.isNotEmpty)
                       FilledButton.tonalIcon(
                         onPressed: _addMovie,
@@ -1140,12 +1334,16 @@ class _MovieListPageState extends State<MovieListPage>
                       ),
                     if (movies.isNotEmpty) ...[
                       const SizedBox(width: 8),
-                      IconButton.filledTonal(
+                      IconButton.filled(
                         onPressed: () {
                           setState(() {
                             _watchedListView = !_watchedListView;
                           });
                         },
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xFFFFB322),
+                          foregroundColor: const Color(0xFF3A2800),
+                        ),
                         icon: Icon(
                           _watchedListView
                               ? Icons.grid_view_rounded
@@ -1238,6 +1436,31 @@ class _MovieListPageState extends State<MovieListPage>
         .toList();
   }
 
+  List<MapEntry<int, String>> _homeGenreEntries(
+    List<MapEntry<int, String>> source,
+  ) {
+    final byId = <int, String>{
+      for (final entry in source) entry.key: entry.value,
+    };
+    final ordered = <MapEntry<int, String>>[];
+
+    for (final prioritizedId in const [28, 35]) {
+      final name = byId[prioritizedId];
+      if (name != null) {
+        ordered.add(MapEntry(prioritizedId, name));
+      }
+    }
+
+    for (final entry in source) {
+      final alreadyIncluded = ordered.any((item) => item.key == entry.key);
+      if (!alreadyIncluded) {
+        ordered.add(entry);
+      }
+    }
+
+    return ordered;
+  }
+
   List<DiscoverMovie> _filteredDiscoverFeedMovies() {
     Iterable<DiscoverMovie> movies = _discoverMovies;
     if (_selectedDiscoverGenreId != null) {
@@ -1309,6 +1532,7 @@ class _MovieListPageState extends State<MovieListPage>
           ),
           TextField(
             controller: _searchController,
+            focusNode: _discoverSearchFocusNode,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
               hintText: t('catalog_search_hint'),
@@ -1437,40 +1661,10 @@ class _MovieListPageState extends State<MovieListPage>
                             ),
                           ),
                           const SizedBox(width: 8),
-                          PopupMenuButton<DiscoverSortField>(
+                          IconButton.filledTonal(
                             tooltip: t('select_sort'),
-                            onSelected: (value) {
-                              setState(() {
-                                _discoverSortField = value;
-                              });
-                            },
-                            itemBuilder: (context) => [
-                              PopupMenuItem(
-                                value: DiscoverSortField.popularityDesc,
-                                child: Text(t('sort_popularity_desc')),
-                              ),
-                              PopupMenuItem(
-                                value: DiscoverSortField.popularityAsc,
-                                child: Text(t('sort_popularity_asc')),
-                              ),
-                              PopupMenuItem(
-                                value: DiscoverSortField.ratingDesc,
-                                child: Text(t('rating_desc')),
-                              ),
-                              PopupMenuItem(
-                                value: DiscoverSortField.ratingAsc,
-                                child: Text(t('rating_asc')),
-                              ),
-                              PopupMenuItem(
-                                value: DiscoverSortField.titleAsc,
-                                child: Text(t('title_asc')),
-                              ),
-                              PopupMenuItem(
-                                value: DiscoverSortField.titleDesc,
-                                child: Text(t('sort_title_desc')),
-                              ),
-                            ],
-                            icon: const Icon(Icons.sort),
+                            onPressed: _openDiscoverSortModal,
+                            icon: const Icon(Icons.tune_rounded),
                           ),
                         ],
                       ),
@@ -1640,7 +1834,12 @@ class _MovieListPageState extends State<MovieListPage>
         .where((movie) => !heroIds.contains(movie.tmdbId))
         .take(16)
         .toList();
+    final highlightedIds = {
+      ...heroIds,
+      ...popularMovies.map((movie) => movie.tmdbId),
+    };
     final genreEntries = _discoverGenreEntries();
+    final homeGenreEntries = _homeGenreEntries(genreEntries);
 
     final accent = const Color(0xFF1ED2E8);
 
@@ -1729,7 +1928,7 @@ class _MovieListPageState extends State<MovieListPage>
               padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
               child: InkWell(
                 borderRadius: BorderRadius.circular(16),
-                onTap: () => _goToTab(1),
+                onTap: _goToDiscoverAndFocusSearch,
                 child: Container(
                   height: 48,
                   padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2002,7 +2201,7 @@ class _MovieListPageState extends State<MovieListPage>
                       },
                     ),
                   ),
-                  ...genreEntries.map(
+                  ...homeGenreEntries.map(
                     (genreEntry) => Padding(
                       padding: const EdgeInsets.only(right: 8),
                       child: ChoiceChip(
@@ -2184,11 +2383,15 @@ class _MovieListPageState extends State<MovieListPage>
                   },
                 ),
               ),
-            if (genreEntries.isNotEmpty) ...[
+            if (homeGenreEntries.isNotEmpty) ...[
               const SizedBox(height: 14),
-              ...genreEntries.take(2).map((genreEntry) {
+              ...homeGenreEntries.take(2).map((genreEntry) {
                 final genreMovies = _discoverMovies
-                    .where((movie) => movie.genreIds.contains(genreEntry.key))
+                    .where(
+                      (movie) =>
+                          movie.genreIds.contains(genreEntry.key) &&
+                          !highlightedIds.contains(movie.tmdbId),
+                    )
                     .take(10)
                     .toList();
                 if (genreMovies.isEmpty) {
@@ -2275,18 +2478,29 @@ class _MovieListPageState extends State<MovieListPage>
 
   Widget _buildWatchlistTab(BuildContext context) {
     String t(String key) => AppStrings.text(context, key);
-    final watchlist = _watchlistMovies();
+    final watchlist = _sortedWatchlistMovies();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '${t('watchlist_title')} (${watchlist.length})',
-            style: Theme.of(
-              context,
-            ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${t('watchlist_title')} (${watchlist.length})',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              IconButton.filledTonal(
+                tooltip: t('select_sort'),
+                onPressed: _openWatchlistSortModal,
+                icon: const Icon(Icons.tune_rounded),
+              ),
+            ],
           ),
           const SizedBox(height: 10),
           Expanded(
@@ -2387,55 +2601,10 @@ class _MovieListPageState extends State<MovieListPage>
               ),
               actions: [
                 if (_currentTab == 2)
-                  PopupMenuButton<String>(
+                  IconButton(
                     tooltip: t('select_sort'),
-                    onSelected: (value) {
-                      switch (value) {
-                        case 'rating_desc':
-                          _updateSorting(
-                            MovieSortField.rating,
-                            SortDirection.desc,
-                          );
-                          break;
-                        case 'rating_asc':
-                          _updateSorting(
-                            MovieSortField.rating,
-                            SortDirection.asc,
-                          );
-                          break;
-                        case 'title_asc':
-                          _updateSorting(
-                            MovieSortField.title,
-                            SortDirection.asc,
-                          );
-                          break;
-                        case 'watched_desc':
-                          _updateSorting(
-                            MovieSortField.watchedAt,
-                            SortDirection.desc,
-                          );
-                          break;
-                      }
-                    },
-                    itemBuilder: (context) => [
-                      PopupMenuItem(
-                        value: 'rating_desc',
-                        child: Text(t('rating_desc')),
-                      ),
-                      PopupMenuItem(
-                        value: 'rating_asc',
-                        child: Text(t('rating_asc')),
-                      ),
-                      PopupMenuItem(
-                        value: 'title_asc',
-                        child: Text(t('title_asc')),
-                      ),
-                      PopupMenuItem(
-                        value: 'watched_desc',
-                        child: Text(t('last_watched')),
-                      ),
-                    ],
-                    icon: const Icon(Icons.sort),
+                    onPressed: _openWatchedSortModal,
+                    icon: const Icon(Icons.tune_rounded),
                   ),
                 const SizedBox(width: 4),
               ],
@@ -2606,6 +2775,7 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
   final Future<_CatalogPreviewData> detailsFuture;
   final String primaryActionLabel;
   final bool primaryActionEnabled;
+  final Future<void> Function(_CatalogPreviewData data)? onPrimaryAction;
   final Future<void> Function(_CatalogPreviewData data)? onFavoriteTap;
 
   const _CatalogMoviePreviewPage({
@@ -2613,6 +2783,7 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
     required this.detailsFuture,
     required this.primaryActionLabel,
     required this.primaryActionEnabled,
+    this.onPrimaryAction,
     this.onFavoriteTap,
   });
 
@@ -2811,9 +2982,9 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
                                   if (data.rottenTomatoesRating.isNotEmpty)
                                     _previewSourceBadge(
                                       context: context,
-                                      icon: Icons.percent_rounded,
+                                      useRottenLogo: true,
                                       value: data.rottenTomatoesRating,
-                                      background: const Color(0xFFEF5851),
+                                      background: const Color(0x88E6463D),
                                       foreground: Colors.white,
                                     ),
                                 ],
@@ -2852,7 +3023,15 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
                                 Expanded(
                                   child: FilledButton.icon(
                                     onPressed: primaryActionEnabled
-                                        ? () => Navigator.pop(context, true)
+                                        ? () async {
+                                            if (onPrimaryAction != null) {
+                                              await onPrimaryAction!(data);
+                                              return;
+                                            }
+                                            if (context.mounted) {
+                                              Navigator.pop(context, true);
+                                            }
+                                          }
                                         : null,
                                     style: FilledButton.styleFrom(
                                       backgroundColor: primaryAction,
@@ -2972,12 +3151,14 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
 
   Widget _previewSourceBadge({
     required BuildContext context,
-    required IconData icon,
+    IconData? icon,
+    bool useRottenLogo = false,
     required String value,
     required Color background,
     required Color foreground,
   }) {
-    final isFontAwesome = icon.fontPackage == 'font_awesome_flutter';
+    final resolvedIcon = icon ?? Icons.circle;
+    final isFontAwesome = resolvedIcon.fontPackage == 'font_awesome_flutter';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -2988,9 +3169,12 @@ class _CatalogMoviePreviewPage extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          isFontAwesome
-              ? FaIcon(icon, size: 13, color: foreground)
-              : Icon(icon, size: 15, color: foreground),
+          if (useRottenLogo)
+            const _RottenTomatoMark(size: 13)
+          else if (isFontAwesome)
+            FaIcon(resolvedIcon, size: 13, color: foreground)
+          else
+            Icon(resolvedIcon, size: 15, color: foreground),
           const SizedBox(width: 6),
           Text(
             value,
@@ -3179,11 +3363,7 @@ class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
                                     Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(
-                                          Icons.percent_rounded,
-                                          size: 14,
-                                          color: Color(0xFFEF5851),
-                                        ),
+                                        const _RottenTomatoMark(size: 12),
                                         const SizedBox(width: 4),
                                         Text(
                                           widget.data.rottenTomatoesRating,
@@ -3213,8 +3393,9 @@ class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
                           initialRating: _rating,
                           minRating: 0.5,
                           allowHalfRating: true,
+                          updateOnDrag: true,
                           itemCount: 5,
-                          itemSize: 38,
+                          itemSize: 44,
                           unratedColor: Colors.white24,
                           itemPadding: const EdgeInsets.symmetric(
                             horizontal: 2,
@@ -3230,7 +3411,7 @@ class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
                           },
                         ),
                         Text(
-                          '${_rating.toStringAsFixed(1)} / 5',
+                          '${_rating.toStringAsFixed(1)} / 5.0',
                           style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(
                                 color: const Color(0xFFFFB322),
@@ -3348,4 +3529,51 @@ class _BottomTabItem extends StatelessWidget {
       ),
     );
   }
+}
+
+class _RottenTomatoMark extends StatelessWidget {
+  final double size;
+
+  const _RottenTomatoMark({required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            top: size * 0.12,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: const Color(0xFFE6463D),
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: size * 0.32,
+            child: Container(
+              width: size * 0.38,
+              height: size * 0.28,
+              decoration: BoxDecoration(
+                color: const Color(0xFF72C23D),
+                borderRadius: BorderRadius.circular(size * 0.4),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SortOption<T> {
+  final T value;
+  final String label;
+
+  const _SortOption(this.value, this.label);
 }

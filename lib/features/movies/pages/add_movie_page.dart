@@ -185,6 +185,7 @@ class _AddMoviePageState extends State<AddMoviePage> {
       final tmdbPoster = await MovieMetadataService.fetchPosterFromTmdb(
         title,
         apiKey: tmdbApiKey,
+        languageCode: settings.languageCode,
       );
       if (!mounted) return;
 
@@ -239,11 +240,13 @@ class _AddMoviePageState extends State<AddMoviePage> {
             title,
             omdbApiKey: omdbApiKey,
             tmdbApiKey: tmdbApiKey,
+            languageCode: settings.languageCode,
           )
         : await MovieMetadataService.fetchMovieMetadataByImdbId(
             selectedMovie.imdbId,
             omdbApiKey: omdbApiKey,
             tmdbApiKey: tmdbApiKey,
+            languageCode: settings.languageCode,
           );
     if (!mounted) return;
 
@@ -851,9 +854,10 @@ class _AddMoviePageState extends State<AddMoviePage> {
       minRating: 0,
       direction: Axis.horizontal,
       allowHalfRating: true,
+      updateOnDrag: true,
       unratedColor: Colors.amber.withValues(alpha: 0.25),
       itemCount: 5,
-      itemSize: 34,
+      itemSize: 38,
       itemPadding: const EdgeInsets.symmetric(horizontal: 2),
       itemBuilder: (context, _) => const Icon(Icons.star, color: Colors.amber),
       onRatingUpdate: (rating) {
@@ -861,7 +865,6 @@ class _AddMoviePageState extends State<AddMoviePage> {
           _rating = rating;
         });
       },
-      updateOnDrag: true,
     );
   }
 }

@@ -119,6 +119,7 @@ class MovieMetadataService {
     String title, {
     required String omdbApiKey,
     String? tmdbApiKey,
+    String languageCode = 'en',
   }) async {
     final trimmedTitle = title.trim();
     final trimmedApiKey = omdbApiKey.trim();
@@ -133,6 +134,7 @@ class MovieMetadataService {
       uri,
       tmdbApiKey: trimmedTmdbApiKey,
       posterSearchTitle: trimmedTitle,
+      languageCode: languageCode,
     );
   }
 
@@ -140,6 +142,7 @@ class MovieMetadataService {
     String imdbId, {
     required String omdbApiKey,
     String? tmdbApiKey,
+    String languageCode = 'en',
   }) async {
     final trimmedImdbId = imdbId.trim();
     final trimmedApiKey = omdbApiKey.trim();
@@ -149,7 +152,11 @@ class MovieMetadataService {
     final uri = Uri.parse(
       'https://www.omdbapi.com/?apikey=$trimmedApiKey&i=$trimmedImdbId',
     );
-    return _fetchMovieMetadataFromUri(uri, tmdbApiKey: trimmedTmdbApiKey);
+    return _fetchMovieMetadataFromUri(
+      uri,
+      tmdbApiKey: trimmedTmdbApiKey,
+      languageCode: languageCode,
+    );
   }
 
   static Future<List<MovieSearchResult>> searchMovies(
@@ -162,48 +169,62 @@ class MovieMetadataService {
       return const [];
     }
 
-    final encodedQuery = Uri.encodeQueryComponent(trimmedQuery);
-    final uri = Uri.parse(
-      'https://www.omdbapi.com/?apikey=$trimmedApiKey&s=$encodedQuery&type=movie',
-    );
-
-    final response = await http.get(uri).timeout(const Duration(seconds: 12));
-    if (response.statusCode != 200) return const [];
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    if ((data['Response'] as String?) != 'True') return const [];
-
-    final search = data['Search'];
-    if (search is! List) return const [];
-
     final results = <MovieSearchResult>[];
-    for (final item in search) {
-      if (item is! Map) continue;
-      final title = _sanitize(item['Title']);
-      final year = _sanitize(item['Year']);
-      final imdbId = _sanitize(item['imdbID']);
-      if (title == null || year == null || imdbId == null) continue;
-      results.add(
-        MovieSearchResult(
-          imdbId: imdbId,
-          title: title,
-          year: year,
-          posterUrl: _sanitize(item['Poster']),
-        ),
+    final seenImdbIds = <String>{};
+    final encodedQuery = Uri.encodeQueryComponent(trimmedQuery);
+
+    for (var page = 1; page <= 2; page++) {
+      final uri = Uri.parse(
+        'https://www.omdbapi.com/?apikey=$trimmedApiKey&s=$encodedQuery&page=$page',
       );
+      final response = await http.get(uri).timeout(const Duration(seconds: 12));
+      if (response.statusCode != 200) break;
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if ((data['Response'] as String?) != 'True') {
+        if (page == 1) {
+          return const [];
+        }
+        break;
+      }
+
+      final search = data['Search'];
+      if (search is! List || search.isEmpty) break;
+
+      for (final item in search) {
+        if (item is! Map) continue;
+        final title = _sanitize(item['Title']);
+        final year = _sanitize(item['Year']);
+        final imdbId = _sanitize(item['imdbID']);
+        if (title == null || year == null || imdbId == null) continue;
+        if (!seenImdbIds.add(imdbId)) continue;
+        results.add(
+          MovieSearchResult(
+            imdbId: imdbId,
+            title: title,
+            year: year,
+            posterUrl: _sanitize(item['Poster']),
+          ),
+        );
+      }
+
+      if (search.length < 10) break;
     }
     return results;
   }
 
   static Future<List<DiscoverMovie>> discoverMovies({
     required String tmdbApiKey,
+    String languageCode = 'en',
   }) async {
     final trimmedApiKey = tmdbApiKey.trim();
     if (trimmedApiKey.isEmpty) return const [];
+    final tmdbLanguage = _tmdbLanguageCode(languageCode);
 
     final uri = Uri.parse(
       'https://api.themoviedb.org/3/discover/movie?api_key=$trimmedApiKey'
-      '&sort_by=popularity.desc&vote_count.gte=300&include_adult=false&page=1',
+      '&sort_by=popularity.desc&vote_count.gte=300&include_adult=false&page=1'
+      '&language=$tmdbLanguage',
     );
     final response = await http.get(uri).timeout(const Duration(seconds: 12));
     if (response.statusCode != 200) return const [];
@@ -259,13 +280,15 @@ class MovieMetadataService {
   static Future<TmdbMovieDetails?> fetchTmdbMovieDetails(
     int tmdbId, {
     required String tmdbApiKey,
+    String languageCode = 'en',
   }) async {
     final trimmedApiKey = tmdbApiKey.trim();
     if (trimmedApiKey.isEmpty) return null;
+    final tmdbLanguage = _tmdbLanguageCode(languageCode);
 
     final uri = Uri.parse(
       'https://api.themoviedb.org/3/movie/$tmdbId?api_key=$trimmedApiKey'
-      '&append_to_response=credits,external_ids',
+      '&append_to_response=credits,external_ids&language=$tmdbLanguage',
     );
 
     final response = await http.get(uri).timeout(const Duration(seconds: 12));
@@ -337,6 +360,7 @@ class MovieMetadataService {
     Uri uri, {
     required String tmdbApiKey,
     String? posterSearchTitle,
+    String languageCode = 'en',
   }) async {
     final response = await http.get(uri).timeout(const Duration(seconds: 12));
     if (response.statusCode != 200) return null;
@@ -355,23 +379,48 @@ class MovieMetadataService {
       }
     }
 
+    final imdbId = _sanitize(data['imdbID']) ?? '';
     var posterUrl = _sanitize(data['Poster']);
+    var year = _sanitize(data['Year']);
+    var genre = _sanitize(data['Genre']);
+    var runtime = _sanitize(data['Runtime']);
+    var plot = _sanitize(data['Plot']);
+
+    if (!languageCode.toLowerCase().startsWith('en') &&
+        tmdbApiKey.isNotEmpty &&
+        imdbId.isNotEmpty) {
+      final localizedData = await _fetchLocalizedTmdbDataByImdbId(
+        imdbId: imdbId,
+        tmdbApiKey: tmdbApiKey,
+        languageCode: languageCode,
+      );
+      year = localizedData['year'] ?? year;
+      genre = localizedData['genre'] ?? genre;
+      runtime = localizedData['runtime'] ?? runtime;
+      plot = localizedData['plot'] ?? plot;
+      posterUrl = localizedData['posterUrl'] ?? posterUrl;
+    }
+
     final titleForPoster = posterSearchTitle ?? _sanitize(data['Title']);
     if (posterUrl == null &&
         tmdbApiKey.isNotEmpty &&
         titleForPoster != null &&
         titleForPoster.isNotEmpty) {
-      posterUrl = await fetchPosterFromTmdb(titleForPoster, apiKey: tmdbApiKey);
+      posterUrl = await fetchPosterFromTmdb(
+        titleForPoster,
+        apiKey: tmdbApiKey,
+        languageCode: languageCode,
+      );
     }
 
     return MovieMetadata(
-      imdbId: _sanitize(data['imdbID']),
+      imdbId: imdbId.isEmpty ? null : imdbId,
       posterUrl: posterUrl,
-      year: _sanitize(data['Year']),
-      genre: _sanitize(data['Genre']),
+      year: year,
+      genre: genre,
       director: _sanitize(data['Director']),
-      runtime: _sanitize(data['Runtime']),
-      plot: _sanitize(data['Plot']),
+      runtime: runtime,
+      plot: plot,
       imdbRating: _parseDouble(data['imdbRating']),
       rottenTomatoesRating: rottenTomatoes,
     );
@@ -380,14 +429,16 @@ class MovieMetadataService {
   static Future<String?> fetchPosterFromTmdb(
     String title, {
     required String apiKey,
+    String languageCode = 'en',
   }) async {
     final trimmedTitle = title.trim();
     final trimmedApiKey = apiKey.trim();
     if (trimmedTitle.isEmpty || trimmedApiKey.isEmpty) return null;
+    final tmdbLanguage = _tmdbLanguageCode(languageCode);
 
     final query = Uri.encodeQueryComponent(trimmedTitle);
     final uri = Uri.parse(
-      'https://api.themoviedb.org/3/search/movie?api_key=$trimmedApiKey&query=$query',
+      'https://api.themoviedb.org/3/search/movie?api_key=$trimmedApiKey&query=$query&language=$tmdbLanguage',
     );
     final response = await http.get(uri).timeout(const Duration(seconds: 12));
     if (response.statusCode != 200) return null;
@@ -405,6 +456,77 @@ class MovieMetadataService {
     return 'https://image.tmdb.org/t/p/w500$posterPath';
   }
 
+  static Future<Map<String, String?>> _fetchLocalizedTmdbDataByImdbId({
+    required String imdbId,
+    required String tmdbApiKey,
+    required String languageCode,
+  }) async {
+    final trimmedImdbId = imdbId.trim();
+    final trimmedApiKey = tmdbApiKey.trim();
+    if (trimmedImdbId.isEmpty || trimmedApiKey.isEmpty) return const {};
+
+    final tmdbLanguage = _tmdbLanguageCode(languageCode);
+    final findUri = Uri.parse(
+      'https://api.themoviedb.org/3/find/$trimmedImdbId?api_key=$trimmedApiKey'
+      '&external_source=imdb_id&language=$tmdbLanguage',
+    );
+
+    final findResponse = await http
+        .get(findUri)
+        .timeout(const Duration(seconds: 12));
+    if (findResponse.statusCode != 200) return const {};
+
+    final findData = jsonDecode(findResponse.body) as Map<String, dynamic>;
+    final movieResults = findData['movie_results'];
+    if (movieResults is! List || movieResults.isEmpty) return const {};
+    final firstMovie = movieResults.first;
+    if (firstMovie is! Map) return const {};
+
+    final tmdbId = int.tryParse(firstMovie['id']?.toString() ?? '');
+    if (tmdbId == null) return const {};
+
+    final detailsUri = Uri.parse(
+      'https://api.themoviedb.org/3/movie/$tmdbId?api_key=$trimmedApiKey&language=$tmdbLanguage',
+    );
+    final detailsResponse = await http
+        .get(detailsUri)
+        .timeout(const Duration(seconds: 12));
+    if (detailsResponse.statusCode != 200) return const {};
+
+    final details = jsonDecode(detailsResponse.body) as Map<String, dynamic>;
+    final releaseDate = _sanitize(details['release_date']) ?? '';
+    final year = releaseDate.length >= 4 ? releaseDate.substring(0, 4) : null;
+    final runtimeValue = _parseDouble(details['runtime']);
+    final runtime = runtimeValue == null ? null : '${runtimeValue.round()} min';
+    final posterPath = _sanitize(details['poster_path']);
+
+    String? genre;
+    final genresData = details['genres'];
+    if (genresData is List && genresData.isNotEmpty) {
+      final names = <String>[];
+      for (final item in genresData) {
+        if (item is! Map) continue;
+        final name = _sanitize(item['name']);
+        if (name != null) {
+          names.add(name);
+        }
+      }
+      if (names.isNotEmpty) {
+        genre = names.join(', ');
+      }
+    }
+
+    return {
+      'year': year,
+      'genre': genre,
+      'runtime': runtime,
+      'plot': _sanitize(details['overview']),
+      'posterUrl': posterPath == null
+          ? null
+          : 'https://image.tmdb.org/t/p/w500$posterPath',
+    };
+  }
+
   static double? _parseDouble(dynamic value) {
     final text = value?.toString().trim() ?? '';
     if (text.isEmpty || text == 'N/A') return null;
@@ -415,5 +537,9 @@ class MovieMetadataService {
     final text = value?.toString().trim() ?? '';
     if (text.isEmpty || text == 'N/A') return null;
     return text;
+  }
+
+  static String _tmdbLanguageCode(String languageCode) {
+    return languageCode.toLowerCase().startsWith('de') ? 'de-DE' : 'en-US';
   }
 }
