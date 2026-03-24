@@ -126,6 +126,7 @@ class _MovieListPageState extends State<MovieListPage>
     setState(() {
       _currentTab = nextTab;
     });
+    _loadMovies();
     if (_currentTab == 0) {
       _loadDiscoverMovies();
     }

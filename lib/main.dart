@@ -12,10 +12,7 @@ Future<void> main() async {
   await appSettings.load();
 
   final cloudService = CloudDatabaseBackupService();
-  final signedIn = await cloudService.silentSignIn();
-  if (signedIn) {
-    await cloudService.restoreDatabase('filme.db');
-  }
+  await cloudService.bootstrap(appSettings);
 
   runApp(MovieRaterApp(settings: appSettings));
 }

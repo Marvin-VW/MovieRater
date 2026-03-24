@@ -8,8 +8,13 @@ enum MovieSortField { title, rating, watchedAt, category }
 
 enum SortDirection { asc, desc }
 
+enum DatabaseChangeType { insert, update, delete }
+
+typedef DatabaseChangeListener = void Function(DatabaseChangeType changeType);
+
 class DatabaseHelper {
   static Database? _db;
+  static DatabaseChangeListener? _changeListener;
 
   static Future<Database> get database async {
     if (_db != null) return _db!;
@@ -112,12 +117,14 @@ class DatabaseHelper {
   static Future<void> deleteMovie(int id) async {
     final db = await database;
     await db.delete('movies', where: 'id = ?', whereArgs: [id]);
+    _changeListener?.call(DatabaseChangeType.delete);
   }
 
   static Future<void> saveMovie(Movie movie) async {
     final db = await database;
     if (movie.id == null) {
       await db.insert('movies', movie.toMap());
+      _changeListener?.call(DatabaseChangeType.insert);
       return;
     }
 
@@ -127,6 +134,23 @@ class DatabaseHelper {
       where: 'id = ?',
       whereArgs: [movie.id],
     );
+    _changeListener?.call(DatabaseChangeType.update);
+  }
+
+  static Future<int> movieCount() async {
+    final db = await database;
+    final result = await db.rawQuery('SELECT COUNT(*) AS count FROM movies');
+    return Sqflite.firstIntValue(result) ?? 0;
+  }
+
+  static Future<void> closeDb() async {
+    if (_db == null) return;
+    await _db!.close();
+    _db = null;
+  }
+
+  static void setChangeListener(DatabaseChangeListener? listener) {
+    _changeListener = listener;
   }
 
   static Future<bool> movieExists({

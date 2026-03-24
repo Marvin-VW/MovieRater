@@ -10,6 +10,8 @@ class AppSettingsController extends ChangeNotifier {
   static const _autoMetadataKey = 'auto_metadata_enabled';
   static const _externalRatingsKey = 'external_ratings_enabled';
   static const _customCategoriesKey = 'custom_categories';
+  static const _cloudAutoBackupKey = 'cloud_auto_backup_enabled';
+  static const _cloudAutoRestoreKey = 'cloud_auto_restore_enabled';
 
   bool _darkModeEnabled = false;
   String _languageCode = 'de';
@@ -19,6 +21,8 @@ class AppSettingsController extends ChangeNotifier {
   bool _autoMetadataEnabled = true;
   bool _externalRatingsEnabled = true;
   List<String> _customCategories = const [];
+  bool _cloudAutoBackupEnabled = true;
+  bool _cloudAutoRestoreEnabled = true;
 
   bool get darkModeEnabled => _darkModeEnabled;
   String get languageCode => _languageCode;
@@ -28,6 +32,8 @@ class AppSettingsController extends ChangeNotifier {
   bool get autoMetadataEnabled => _autoMetadataEnabled;
   bool get externalRatingsEnabled => _externalRatingsEnabled;
   List<String> get customCategories => List.unmodifiable(_customCategories);
+  bool get cloudAutoBackupEnabled => _cloudAutoBackupEnabled;
+  bool get cloudAutoRestoreEnabled => _cloudAutoRestoreEnabled;
   ThemeMode get themeMode =>
       _darkModeEnabled ? ThemeMode.dark : ThemeMode.light;
 
@@ -43,6 +49,8 @@ class AppSettingsController extends ChangeNotifier {
     _autoMetadataEnabled = prefs.getBool(_autoMetadataKey) ?? true;
     _externalRatingsEnabled = prefs.getBool(_externalRatingsKey) ?? true;
     _customCategories = prefs.getStringList(_customCategoriesKey) ?? const [];
+    _cloudAutoBackupEnabled = prefs.getBool(_cloudAutoBackupKey) ?? true;
+    _cloudAutoRestoreEnabled = prefs.getBool(_cloudAutoRestoreKey) ?? true;
     notifyListeners();
   }
 
@@ -130,6 +138,22 @@ class AppSettingsController extends ChangeNotifier {
     _customCategories = updated;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_customCategoriesKey, _customCategories);
+    notifyListeners();
+  }
+
+  Future<void> setCloudAutoBackupEnabled(bool enabled) async {
+    if (_cloudAutoBackupEnabled == enabled) return;
+    _cloudAutoBackupEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_cloudAutoBackupKey, enabled);
+    notifyListeners();
+  }
+
+  Future<void> setCloudAutoRestoreEnabled(bool enabled) async {
+    if (_cloudAutoRestoreEnabled == enabled) return;
+    _cloudAutoRestoreEnabled = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_cloudAutoRestoreKey, enabled);
     notifyListeners();
   }
 }
