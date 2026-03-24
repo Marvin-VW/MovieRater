@@ -2,9 +2,21 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional tag to create/update a release (example: v1.2.0)'
+        required: false
+        type: string
+      create_release:
+        description: 'Create or update a GitHub Release'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -41,10 +53,25 @@ jobs:
           name: android-apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
+      - name: Determine release tag
+        id: release_meta
+        shell: bash
+        run: |
+          tag=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            tag="${{ inputs.release_tag }}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.release_meta.outputs.tag != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.create_release == 'true')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
           files: build/app/outputs/flutter-apk/app-release.apk
 
   ios:
