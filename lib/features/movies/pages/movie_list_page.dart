@@ -78,6 +78,8 @@ class _MovieListPageState extends State<MovieListPage>
   int _homeCarouselIndex = 0;
   String _watchedSearchQuery = '';
   String _lastTmdbApiKey = '';
+  String _lastLanguageCode = '';
+  bool _isRefreshingLibraryLocalization = false;
   bool _isSearching = false;
   bool _isLoadingDiscover = false;
   bool _hasLoadedDiscoverOnce = false;
@@ -99,10 +101,115 @@ class _MovieListPageState extends State<MovieListPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final tmdbApiKey = AppSettingsScope.of(context).tmdbApiKey.trim();
-    if (tmdbApiKey == _lastTmdbApiKey) return;
+    final settings = AppSettingsScope.of(context);
+    final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
+
+    final languageChanged =
+        _lastLanguageCode.isNotEmpty && _lastLanguageCode != languageCode;
+    final tmdbChanged = tmdbApiKey != _lastTmdbApiKey;
+
+    if (tmdbChanged || languageChanged) {
+      _loadDiscoverMovies();
+    }
+
+    if (languageChanged) {
+      _reloadSearchForCurrentLanguage();
+      unawaited(_refreshLibraryLocalization(languageCode: languageCode));
+    }
+
     _lastTmdbApiKey = tmdbApiKey;
-    _loadDiscoverMovies();
+    _lastLanguageCode = languageCode;
+  }
+
+  void _reloadSearchForCurrentLanguage() {
+    final query = _searchController.text.trim();
+    if (query.length < 2) {
+      if (_searchResults.isNotEmpty || _isSearching) {
+        setState(() {
+          _searchResults = [];
+          _isSearching = false;
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+    });
+    _searchMovies(query);
+  }
+
+  Future<void> _refreshLibraryLocalization({
+    required String languageCode,
+  }) async {
+    if (_isRefreshingLibraryLocalization) return;
+
+    final settings = AppSettingsScope.of(context);
+    final tmdbApiKey = settings.tmdbApiKey.trim();
+    if (tmdbApiKey.isEmpty || _movies.isEmpty) return;
+
+    _isRefreshingLibraryLocalization = true;
+    try {
+      final candidates = _movies
+          .where((movie) => movie.imdbId.trim().isNotEmpty)
+          .toList(growable: false);
+      if (candidates.isEmpty) return;
+
+      var hasChanges = false;
+      for (final movie in candidates) {
+        final localized =
+            await MovieMetadataService.fetchLocalizedMetadataByImdbId(
+              movie.imdbId,
+              tmdbApiKey: tmdbApiKey,
+              languageCode: languageCode,
+            );
+        if (localized == null) continue;
+
+        final nextTitle = (localized.title ?? movie.title).trim();
+        final nextYear = (localized.year ?? movie.year).trim();
+        final nextGenre = (localized.genre ?? movie.genre).trim();
+        final nextDirector = (localized.director ?? movie.director).trim();
+        final nextRuntime = (localized.runtime ?? movie.runtime).trim();
+        final nextPosterUrl = (localized.posterUrl ?? movie.posterUrl).trim();
+
+        final changed =
+            nextTitle != movie.title ||
+            nextYear != movie.year ||
+            nextGenre != movie.genre ||
+            nextDirector != movie.director ||
+            nextRuntime != movie.runtime ||
+            nextPosterUrl != movie.posterUrl;
+        if (!changed) continue;
+
+        final updatedMovie = Movie(
+          id: movie.id,
+          title: nextTitle.isEmpty ? movie.title : nextTitle,
+          rating: movie.rating,
+          comment: movie.comment,
+          imagePath: movie.imagePath,
+          posterUrl: nextPosterUrl,
+          year: nextYear,
+          genre: nextGenre,
+          director: nextDirector,
+          runtime: nextRuntime,
+          watchedAt: movie.watchedAt,
+          watchPlatform: movie.watchPlatform,
+          imdbRating: movie.imdbRating,
+          rottenTomatoesRating: movie.rottenTomatoesRating,
+          imdbId: movie.imdbId,
+          category: movie.category,
+        );
+        await DatabaseHelper.saveMovie(updatedMovie);
+        hasChanges = true;
+      }
+
+      if (hasChanges && mounted) {
+        await _loadMovies();
+      }
+    } finally {
+      _isRefreshingLibraryLocalization = false;
+    }
   }
 
   @override
@@ -478,6 +585,8 @@ class _MovieListPageState extends State<MovieListPage>
   Future<void> _searchMovies(String query) async {
     final settings = AppSettingsScope.of(context);
     final omdbApiKey = settings.omdbApiKey.trim();
+    final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
 
     if (omdbApiKey.isEmpty) {
       if (!mounted) return;
@@ -493,13 +602,19 @@ class _MovieListPageState extends State<MovieListPage>
       results = await MovieMetadataService.searchMovies(
         query,
         omdbApiKey: omdbApiKey,
+        tmdbApiKey: tmdbApiKey,
+        languageCode: languageCode,
       );
     } catch (_) {
       results = const [];
     }
 
     if (!mounted) return;
-    if (_searchController.text.trim() != query) return;
+    final currentSettings = AppSettingsScope.of(context);
+    if (_searchController.text.trim() != query ||
+        currentSettings.languageCode != languageCode) {
+      return;
+    }
 
     setState(() {
       _isSearching = false;
@@ -541,7 +656,7 @@ class _MovieListPageState extends State<MovieListPage>
     if (!mounted) return;
 
     final quickData = _CatalogPreviewData(
-      title: result.title,
+      title: metadata?.title ?? result.title,
       year: metadata?.year ?? result.year,
       posterUrl: metadata?.posterUrl ?? result.posterUrl,
       genre: metadata?.genre ?? '',
@@ -975,6 +1090,65 @@ class _MovieListPageState extends State<MovieListPage>
     _tabController.animateTo(2);
   }
 
+  Future<_CatalogPreviewData> _resolveMoviePreviewData(Movie movie) async {
+    final seedData = _CatalogPreviewData(
+      title: movie.title,
+      year: movie.year,
+      posterUrl: movie.posterUrl.isNotEmpty ? movie.posterUrl : null,
+      genre: movie.genre,
+      director: movie.director,
+      runtime: movie.runtime,
+      plot: movie.comment,
+      imdbRating: movie.imdbRating,
+      rottenTomatoesRating: movie.rottenTomatoesRating,
+      imdbId: movie.imdbId,
+    );
+
+    final imdbId = movie.imdbId.trim();
+    if (imdbId.isEmpty) return seedData;
+
+    final settings = AppSettingsScope.of(context);
+    final omdbApiKey = settings.omdbApiKey.trim();
+    final tmdbApiKey = settings.tmdbApiKey.trim();
+    final languageCode = settings.languageCode;
+
+    try {
+      MovieMetadata? metadata;
+      if (omdbApiKey.isNotEmpty) {
+        metadata = await MovieMetadataService.fetchMovieMetadataByImdbId(
+          imdbId,
+          omdbApiKey: omdbApiKey,
+          tmdbApiKey: tmdbApiKey,
+          languageCode: languageCode,
+        );
+      } else if (tmdbApiKey.isNotEmpty) {
+        metadata = await MovieMetadataService.fetchLocalizedMetadataByImdbId(
+          imdbId,
+          tmdbApiKey: tmdbApiKey,
+          languageCode: languageCode,
+        );
+      }
+
+      if (metadata == null) return seedData;
+
+      return seedData.copyWith(
+        title: metadata.title ?? seedData.title,
+        year: metadata.year ?? seedData.year,
+        posterUrl: metadata.posterUrl ?? seedData.posterUrl,
+        genre: metadata.genre ?? seedData.genre,
+        director: metadata.director ?? seedData.director,
+        runtime: metadata.runtime ?? seedData.runtime,
+        plot: metadata.plot ?? seedData.plot,
+        imdbRating: metadata.imdbRating ?? seedData.imdbRating,
+        rottenTomatoesRating:
+            metadata.rottenTomatoesRating ?? seedData.rottenTomatoesRating,
+        imdbId: metadata.imdbId ?? seedData.imdbId,
+      );
+    } catch (_) {
+      return seedData;
+    }
+  }
+
   Future<void> _showMovieDetails(Movie movie) async {
     final changeRatingLabel = AppStrings.text(context, 'change_rating');
     final data = _CatalogPreviewData(
@@ -995,12 +1169,12 @@ class _MovieListPageState extends State<MovieListPage>
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
           initialData: data,
-          detailsFuture: Future.value(data),
+          detailsFuture: _resolveMoviePreviewData(movie),
           primaryActionLabel: changeRatingLabel,
           primaryActionEnabled: true,
-          onPrimaryAction: (_) async {
+          onPrimaryAction: (latestData) async {
             final newRating = await _openQuickRatingEditor(
-              data: data,
+              data: latestData,
               initialRating: movie.rating,
               actionLabel: changeRatingLabel,
             );
@@ -1032,12 +1206,12 @@ class _MovieListPageState extends State<MovieListPage>
       MaterialPageRoute(
         builder: (_) => _CatalogMoviePreviewPage(
           initialData: data,
-          detailsFuture: Future.value(data),
+          detailsFuture: _resolveMoviePreviewData(movie),
           primaryActionLabel: markWatchedLabel,
           primaryActionEnabled: true,
-          onPrimaryAction: (_) async {
+          onPrimaryAction: (latestData) async {
             final rating = await _openQuickRatingEditor(
-              data: data,
+              data: latestData,
               initialRating: 3.0,
               actionLabel: markWatchedLabel,
             );
@@ -1070,6 +1244,19 @@ class _MovieListPageState extends State<MovieListPage>
     }
 
     return const Center(child: Icon(Icons.movie_creation_outlined, size: 34));
+  }
+
+  String _formatRatingValue(double value) {
+    final raw = value.toStringAsFixed(1);
+    final languageCode = AppSettingsScope.of(context).languageCode;
+    if (languageCode.toLowerCase().startsWith('de')) {
+      return raw.replaceAll('.', ',');
+    }
+    return raw;
+  }
+
+  String _formatRatingOutOfFive(double value) {
+    return '${_formatRatingValue(value)} / ${_formatRatingValue(5.0)}';
   }
 
   Widget _watchedBubbleCard(Movie movie) {
@@ -1150,7 +1337,7 @@ class _MovieListPageState extends State<MovieListPage>
                     spacing: 6,
                     runSpacing: 6,
                     children: [
-                      _metricPill('${movie.rating.toStringAsFixed(1)} / 5'),
+                      _metricPill(_formatRatingOutOfFive(movie.rating)),
                       _sourceRatingBadge(
                         icon: FontAwesomeIcons.imdb,
                         value: movie.imdbRating?.toStringAsFixed(1) ?? '-',
@@ -1260,7 +1447,7 @@ class _MovieListPageState extends State<MovieListPage>
           spacing: 6,
           runSpacing: 6,
           children: [
-            _metricPill(movie.rating.toStringAsFixed(1)),
+            _metricPill(_formatRatingOutOfFive(movie.rating)),
             _sourceRatingBadge(
               icon: FontAwesomeIcons.imdb,
               value: movie.imdbRating?.toStringAsFixed(1) ?? '-',
@@ -3248,6 +3435,15 @@ class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
     _rating = widget.initialRating.clamp(0.5, 5.0);
   }
 
+  String _formatRating(double value) {
+    final raw = value.toStringAsFixed(1);
+    final languageCode = AppSettingsScope.of(context).languageCode;
+    if (languageCode.toLowerCase().startsWith('de')) {
+      return raw.replaceAll('.', ',');
+    }
+    return raw;
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -3412,7 +3608,7 @@ class _QuickMovieRatingPageState extends State<_QuickMovieRatingPage> {
                           },
                         ),
                         Text(
-                          '${_rating.toStringAsFixed(1)} / 5.0',
+                          '${_formatRating(_rating)} / ${_formatRating(5.0)}',
                           style: Theme.of(context).textTheme.titleMedium
                               ?.copyWith(
                                 color: const Color(0xFFFFB322),
